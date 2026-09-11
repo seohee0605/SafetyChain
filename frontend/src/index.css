@@ -1,0 +1,35 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Barlow Condensed", sans-serif;
+  --font-sans: "Inter", sans-serif;
+
+  --color-charcoal: #1c1b1b;
+  --color-charcoal-light: #322f2d;
+  --color-paper: #f6f2e9;
+  --color-paper-dark: #ece5d3;
+  --color-safety-yellow: #f4c21a;
+  --color-safety-yellow-dark: #d9a90a;
+  --color-safety-orange: #e8590c;
+  --color-ink: #2b2926;
+  --color-ink-muted: #6b6259;
+  --color-hazard-green: #1f6b3d;
+  --color-hazard-red: #b3241c;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+.hazard-stripes {
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--color-safety-yellow) 0px,
+    var(--color-safety-yellow) 10px,
+    var(--color-charcoal) 10px,
+    var(--color-charcoal) 20px
+  );
+}

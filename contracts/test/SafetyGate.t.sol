@@ -3,42 +3,70 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {SafetyGate} from "../src/SafetyGate.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
+/// 테스트 이름은 "어떤 공격/규칙을 검증하는지"가 드러나게 지었다.
 contract SafetyGateTest is Test {
     SafetyGate gate;
 
-    address admin = makeAddr("admin");
+    // 시공사 운영 관리자 (msg.sender로 호출)
+    address contractorAdmin = makeAddr("contractorAdmin");
+
+    // 서명 키들 (EIP-712 서명 → 릴레이 제출)
     uint256 devicePk = 0xA11CE;
+    uint256 supervisorPk = 0x5A9E;
+    uint256 inspectorPk = 0x1A5;
+    uint256 ownerPk = 0x0E1;
+    uint256 attackerPk = 0xBAD;
     address device;
-    uint256 otherDevicePk = 0xB0B;
-    address otherDevice;
+    address supervisor;
+    address inspector;
+    address owner;
+    address attacker;
 
     bytes32 constant SITE_ID = keccak256("site-1");
-    bytes32 constant CASE_ID = keccak256("site-1|2026-09-10");
-    bytes32 constant MODEL_HASH = keccak256("yolo-v8n-weights");
+    bytes32 constant CASE_ID = keccak256("site-1|2026-10-12");
+    bytes32 constant MODEL_HASH = keccak256("ppe-weights");
+    bytes32 constant SCOPE = keccak256("nonces-of-day");
 
     bytes32 constant CHECKIN_TYPEHASH = keccak256(
-        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 nonce,uint64 timestamp)"
+        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 timestamp)"
     );
-
     bytes32 constant SITE_RECORD_TYPEHASH = keccak256(
         "SiteRecord(bytes32 caseId,bytes32 siteId,bytes32 recordHash,bool hazardsControlled,bytes32 nonce,uint64 timestamp)"
     );
-
-    bytes32 constant CASE_REVIEW_TYPEHASH = keccak256(
-        "CaseReview(bytes32 caseId,bytes32 reviewScopeHash,bool reviewResult,bytes32 nonce,uint64 timestamp)"
+    bytes32 constant OVERRIDE_TYPEHASH =
+        keccak256("Override(bytes32 checkInNonce,uint8 reasonCode,bytes32 nonce,uint64 timestamp)");
+    bytes32 constant CASE_ACTION_TYPEHASH = keccak256(
+        "CaseAction(bytes32 caseId,bytes32 scopeHash,uint8 action,uint8 reasonCode,bytes32 nonce,uint64 timestamp)"
     );
 
-    function setUp() public {
-        device = vm.addr(devicePk);
-        otherDevice = vm.addr(otherDevicePk);
+    uint256 nonceCounter;
 
-        vm.prank(admin);
-        gate = new SafetyGate(admin);
+    function setUp() public {
+        vm.warp(1_790_000_000); // 2026년 근처의 현실적인 블록 시각
+        device = vm.addr(devicePk);
+        supervisor = vm.addr(supervisorPk);
+        inspector = vm.addr(inspectorPk);
+        owner = vm.addr(ownerPk);
+        attacker = vm.addr(attackerPk);
+
+        gate = new SafetyGate(contractorAdmin, inspector, owner);
+
+        _registerSigner(gate.GATE_DEVICE_ROLE(), device, inspectorPk);
+        _registerSigner(gate.SUPERVISOR_ROLE(), supervisor, ownerPk);
     }
 
-    function _domainSeparator() internal view returns (bytes32) {
-        return keccak256(
+    // ------------------------------------------------------------------
+    // helpers
+    // ------------------------------------------------------------------
+
+    function _nonce() internal returns (bytes32) {
+        return keccak256(abi.encode("nonce", ++nonceCounter));
+    }
+
+    function _sign(uint256 pk, bytes32 structHash) internal view returns (bytes memory) {
+        bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256(bytes("SafetyChain")),
@@ -47,377 +75,485 @@ contract SafetyGateTest is Test {
                 address(gate)
             )
         );
-    }
-
-    function _signCheckIn(SafetyGate.CheckIn memory c, uint256 pk) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                CHECKIN_TYPEHASH,
-                c.caseId,
-                c.workerId,
-                c.siteId,
-                c.helmetPass,
-                c.shoesPass,
-                c.alcoholPass,
-                c.modelHash,
-                c.nonce,
-                c.timestamp
-            )
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
         return abi.encodePacked(r, s, v);
     }
 
-    function _sampleCheckIn(bytes32 nonce) internal view returns (SafetyGate.CheckIn memory) {
+    function _registerSigner(bytes32 role, address account, uint256 approverPk) internal returns (uint256 id) {
+        vm.prank(contractorAdmin);
+        id = gate.proposeSigner(role, account);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(approverPk, gate.signerApprovalDigest(id));
+        gate.approveSigner(id, abi.encodePacked(r, s, v));
+    }
+
+    function _checkIn(bytes32 nonce, bool helmet, bool shoes, bool alcohol)
+        internal
+        view
+        returns (SafetyGate.CheckIn memory)
+    {
         return SafetyGate.CheckIn({
             caseId: CASE_ID,
             workerId: keccak256("worker-1"),
             siteId: SITE_ID,
-            helmetPass: true,
-            shoesPass: true,
-            alcoholPass: true,
+            helmetPass: helmet,
+            shoesPass: shoes,
+            alcoholPass: alcohol,
             modelHash: MODEL_HASH,
+            evidenceHash: keccak256("photo-bytes"),
             nonce: nonce,
             timestamp: uint64(block.timestamp)
         });
     }
 
-    function _signSiteRecord(SafetyGate.SiteRecord memory r, uint256 pk) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                SITE_RECORD_TYPEHASH, r.caseId, r.siteId, r.recordHash, r.hazardsControlled, r.nonce, r.timestamp
+    function _signCheckIn(SafetyGate.CheckIn memory c, uint256 pk) internal view returns (bytes memory) {
+        return _sign(
+            pk,
+            keccak256(
+                abi.encode(
+                    CHECKIN_TYPEHASH,
+                    c.caseId,
+                    c.workerId,
+                    c.siteId,
+                    c.helmetPass,
+                    c.shoesPass,
+                    c.alcoholPass,
+                    c.modelHash,
+                    c.evidenceHash,
+                    c.nonce,
+                    c.timestamp
+                )
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 rr, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(rr, s, v);
     }
 
-    function _sampleSiteRecord(bytes32 nonce) internal view returns (SafetyGate.SiteRecord memory) {
+    function _submitCheckIn(bool helmet, bool shoes, bool alcohol) internal returns (bytes32 nonce) {
+        nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, helmet, shoes, alcohol);
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+    }
+
+    function _override(bytes32 checkInNonce, uint8 reason) internal returns (SafetyGate.Override memory o) {
+        o = SafetyGate.Override({
+            checkInNonce: checkInNonce, reasonCode: reason, nonce: _nonce(), timestamp: uint64(block.timestamp)
+        });
+    }
+
+    function _signOverride(SafetyGate.Override memory o, uint256 pk) internal view returns (bytes memory) {
+        return _sign(pk, keccak256(abi.encode(OVERRIDE_TYPEHASH, o.checkInNonce, o.reasonCode, o.nonce, o.timestamp)));
+    }
+
+    function _siteRecord(bytes32 nonce) internal view returns (SafetyGate.SiteRecord memory) {
         return SafetyGate.SiteRecord({
             caseId: CASE_ID,
             siteId: SITE_ID,
-            recordHash: keccak256("daily-risk-assessment-doc"),
+            recordHash: keccak256("risk-assessment"),
             hazardsControlled: true,
             nonce: nonce,
             timestamp: uint64(block.timestamp)
         });
     }
 
-    function _signCaseReview(SafetyGate.CaseReview memory r, uint256 pk) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(CASE_REVIEW_TYPEHASH, r.caseId, r.reviewScopeHash, r.reviewResult, r.nonce, r.timestamp)
+    function _signSiteRecord(SafetyGate.SiteRecord memory r, uint256 pk) internal view returns (bytes memory) {
+        return _sign(
+            pk,
+            keccak256(
+                abi.encode(
+                    SITE_RECORD_TYPEHASH, r.caseId, r.siteId, r.recordHash, r.hazardsControlled, r.nonce, r.timestamp
+                )
+            )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 rr, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(rr, s, v);
     }
 
-    function _sampleCaseReview(bytes32 nonce) internal view returns (SafetyGate.CaseReview memory) {
-        return SafetyGate.CaseReview({
+    function _caseAction(uint8 action, uint8 reason, bytes32 scope) internal returns (SafetyGate.CaseAction memory) {
+        return SafetyGate.CaseAction({
             caseId: CASE_ID,
-            reviewScopeHash: keccak256("reviewed-checkins-and-siterecords"),
-            reviewResult: true,
-            nonce: nonce,
+            scopeHash: scope,
+            action: action,
+            reasonCode: reason,
+            nonce: _nonce(),
             timestamp: uint64(block.timestamp)
         });
     }
 
-    // ---- registerDevice / revokeDevice ----
-
-    function test_adminCanRegisterDevice() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-        assertTrue(gate.isNonceUsed(bytes32(0)) == false); // sanity: fresh state
+    function _signCaseAction(SafetyGate.CaseAction memory a, uint256 pk) internal view returns (bytes memory) {
+        return _sign(
+            pk,
+            keccak256(
+                abi.encode(CASE_ACTION_TYPEHASH, a.caseId, a.scopeHash, a.action, a.reasonCode, a.nonce, a.timestamp)
+            )
+        );
     }
 
-    function test_nonAdminCannotRegisterDevice() public {
-        vm.prank(device);
+    function _act(uint8 action, uint8 reason, bytes32 scope, uint256 pk) internal {
+        SafetyGate.CaseAction memory a = _caseAction(action, reason, scope);
+        gate.submitCaseAction(a, _signCaseAction(a, pk));
+    }
+
+    // ==================================================================
+    // 1. 서명자 등록: 시공사 제안 + 감리·발주처 승인
+    // ==================================================================
+
+    function test_constructor_grantsRoles_andNobodyIsDefaultAdmin() public view {
+        assertTrue(gate.hasRole(gate.CONTRACTOR_ADMIN_ROLE(), contractorAdmin));
+        assertTrue(gate.hasRole(gate.INSPECTOR_ROLE(), inspector));
+        assertTrue(gate.hasRole(gate.OWNER_ROLE(), owner));
+        assertFalse(gate.hasRole(gate.DEFAULT_ADMIN_ROLE(), contractorAdmin));
+    }
+
+    function test_contractorAdmin_cannotGrantRoleDirectly() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(contractorAdmin);
         vm.expectRevert();
-        gate.registerDevice(device);
+        gate.grantRole(role, attacker);
     }
 
-    function test_adminCanRevokeDevice() public {
-        vm.startPrank(admin);
-        gate.registerDevice(device);
-        gate.revokeDevice(device);
-        vm.stopPrank();
+    function test_proposedSigner_hasNoPowerUntilApproved() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(contractorAdmin);
+        gate.proposeSigner(role, attacker);
+        assertFalse(gate.hasRole(role, attacker));
 
-        SafetyGate.CheckIn memory c = _sampleCheckIn(keccak256("nonce-revoked"));
+        bytes32 nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
+        bytes memory sig = _signCheckIn(c, attackerPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, attacker, role));
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_approveSigner_byOwner_activates() public {
+        address newDevice = makeAddr("newDevice");
+        _registerSigner(gate.GATE_DEVICE_ROLE(), newDevice, ownerPk);
+        assertTrue(gate.hasRole(gate.GATE_DEVICE_ROLE(), newDevice));
+        assertEq(gate.getProposal(gate.proposalCount() - 1).approvedBy, owner);
+    }
+
+    function test_approveSigner_selfApprovalByContractorSideRejected() public {
+        // 시공사 쪽(감독자 키)이 스스로 승인 서명을 만들어도 거부된다
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(contractorAdmin);
+        uint256 id = gate.proposeSigner(role, attacker);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(supervisorPk, gate.signerApprovalDigest(id));
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, supervisor, gate.INSPECTOR_ROLE()));
+        gate.approveSigner(id, abi.encodePacked(r, s, v));
+    }
+
+    function test_approveSigner_cannotBeReplayed() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(contractorAdmin);
+        uint256 id = gate.proposeSigner(role, makeAddr("d2"));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(inspectorPk, gate.signerApprovalDigest(id));
+        gate.approveSigner(id, abi.encodePacked(r, s, v));
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.ProposalAlreadyExecuted.selector, id));
+        gate.approveSigner(id, abi.encodePacked(r, s, v));
+    }
+
+    function test_onlyContractorAdmin_canPropose() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        bytes32 adminRole = gate.CONTRACTOR_ADMIN_ROLE();
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, attacker, adminRole)
+        );
+        vm.prank(attacker);
+        gate.proposeSigner(role, attacker);
+    }
+
+    function test_cannotProposeInspectorOrOwnerRole() public {
+        bytes32 role = gate.INSPECTOR_ROLE();
+        vm.prank(contractorAdmin);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.RoleNotAssignable.selector, role));
+        gate.proposeSigner(role, attacker);
+    }
+
+    function test_revokedDevice_cannotSubmit_butPastRecordsRemain() public {
+        bytes32 past = _submitCheckIn(true, true, true);
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(contractorAdmin);
+        gate.revokeSigner(role, device);
+
+        bytes32 nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
         bytes memory sig = _signCheckIn(c, devicePk);
-
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, device, role));
         gate.submitCheckIn(c, sig);
+
+        assertEq(gate.getCheckIn(past).device, device);
     }
 
-    // ---- submitCheckIn happy path ----
+    // ==================================================================
+    // 2. 출입 검사 + 역할 분리 + 소급 차단
+    // ==================================================================
 
-    function test_submitCheckIn_success() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
+    function test_checkIn_storesDeviceBlockTimeAndEvidence() public {
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        SafetyGate.StoredCheckIn memory s = gate.getCheckIn(nonce);
+        assertEq(s.device, device);
+        assertEq(s.anchoredAt, block.timestamp);
+        assertEq(s.data.evidenceHash, keccak256("photo-bytes"));
+        assertTrue(gate.isNonceUsed(nonce));
+        assertEq(gate.getSiteStats(SITE_ID).checkIns, 1);
+        assertEq(gate.getSiteStats(SITE_ID).failed, 0);
+    }
 
-        SafetyGate.CheckIn memory c = _sampleCheckIn(keccak256("nonce-1"));
+    function test_checkIn_failCountedInStats() public {
+        _submitCheckIn(false, true, true);
+        assertEq(gate.getSiteStats(SITE_ID).failed, 1);
+    }
+
+    function test_checkIn_replayRejected() public {
+        bytes32 nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
         bytes memory sig = _signCheckIn(c, devicePk);
-
-        vm.expectEmit(true, true, false, true);
-        emit SafetyGate.CheckInRecorded(c.siteId, c.workerId, 0, true, device);
-
         gate.submitCheckIn(c, sig);
-
-        assertTrue(gate.isNonceUsed(c.nonce));
-
-        SafetyGate.CheckIn[] memory checkIns = gate.getCheckIns(SITE_ID, 0, 1);
-        assertEq(checkIns.length, 1);
-        assertEq(checkIns[0].workerId, c.workerId);
-        assertEq(checkIns[0].caseId, CASE_ID);
-        assertEq(checkIns[0].nonce, c.nonce);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.NonceAlreadyUsed.selector, nonce));
+        gate.submitCheckIn(c, sig);
     }
 
-    function test_submitCheckIn_allPassedFalse_whenAnyCheckFails() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
+    function test_checkIn_supervisorKeyCannotForgeWorkerRecord() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        bytes memory sig = _signCheckIn(c, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, supervisor, gate.GATE_DEVICE_ROLE()));
+        gate.submitCheckIn(c, sig);
+    }
 
-        SafetyGate.CheckIn memory c = _sampleCheckIn(keccak256("nonce-fail"));
-        c.helmetPass = false;
+    function test_checkIn_tamperedPayloadRejected() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), false, true, true);
         bytes memory sig = _signCheckIn(c, devicePk);
-
-        vm.expectEmit(true, true, false, true);
-        emit SafetyGate.CheckInRecorded(c.siteId, c.workerId, 0, false, device);
-
+        c.helmetPass = true; // 서명 후 결과 조작
+        vm.expectRevert(); // 복구된 주소가 등록 기기가 아님
         gate.submitCheckIn(c, sig);
     }
 
-    // ---- replay protection ----
-
-    function test_submitCheckIn_revertsOnReusedNonce() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.CheckIn memory c = _sampleCheckIn(keccak256("nonce-replay"));
+    function test_checkIn_backdatedOneDayRejected() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.timestamp = uint64(block.timestamp - 1 days); // "어제 점검했다"고 지금 기록
         bytes memory sig = _signCheckIn(c, devicePk);
-
-        gate.submitCheckIn(c, sig);
-
-        vm.expectRevert();
-        gate.submitCheckIn(c, sig);
-    }
-
-    // ---- device attestation ----
-
-    function test_submitCheckIn_revertsOnUnregisteredDevice() public {
-        SafetyGate.CheckIn memory c = _sampleCheckIn(keccak256("nonce-unreg"));
-        bytes memory sig = _signCheckIn(c, otherDevicePk);
-
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, c.timestamp, uint64(block.timestamp))
+        );
         gate.submitCheckIn(c, sig);
     }
 
-    function test_submitCheckIn_revertsOnTamperedPayload() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.CheckIn memory c = _sampleCheckIn(keccak256("nonce-tamper"));
+    function test_checkIn_futureTimestampRejected() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.timestamp = uint64(block.timestamp + 5 minutes);
         bytes memory sig = _signCheckIn(c, devicePk);
-
-        c.helmetPass = false; // tamper after signing
-
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, c.timestamp, uint64(block.timestamp))
+        );
         gate.submitCheckIn(c, sig);
     }
 
-    // ---- view helpers ----
-
-    function test_isNonceUsed_falseInitially() public view {
-        assertFalse(gate.isNonceUsed(keccak256("never-used")));
+    function test_checkIn_withinNetworkDelayAccepted() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        bytes memory sig = _signCheckIn(c, devicePk);
+        vm.warp(block.timestamp + 2 minutes); // 테스트넷 지연
+        gate.submitCheckIn(c, sig);
+        assertEq(gate.getCheckIn(c.nonce).anchoredAt, block.timestamp);
     }
 
-    function test_getCheckIns_rangeAcrossMultipleSites() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.CheckIn memory c1 = _sampleCheckIn(keccak256("nonce-a"));
-        gate.submitCheckIn(c1, _signCheckIn(c1, devicePk));
-
-        SafetyGate.CheckIn memory c2 = _sampleCheckIn(keccak256("nonce-b"));
-        gate.submitCheckIn(c2, _signCheckIn(c2, devicePk));
-
-        SafetyGate.CheckIn[] memory checkIns = gate.getCheckIns(SITE_ID, 0, 2);
-        assertEq(checkIns.length, 2);
-        assertEq(checkIns[0].nonce, c1.nonce);
-        assertEq(checkIns[1].nonce, c2.nonce);
+    function test_getCheckIns_range() public {
+        _submitCheckIn(true, true, true);
+        _submitCheckIn(false, true, true);
+        _submitCheckIn(true, true, true);
+        assertEq(gate.getCheckIns(SITE_ID, 0, 100).length, 3);
+        assertEq(gate.getCheckIns(SITE_ID, 1, 2).length, 1);
+        assertEq(gate.getCheckIns(SITE_ID, 5, 9).length, 0);
     }
 
-    // ---- submitSiteRecord ----
+    // ==================================================================
+    // 3. Manual Override
+    // ==================================================================
 
-    function test_submitSiteRecord_success() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
+    function test_override_supervisorRecordsReason_andStatsCount() public {
+        bytes32 target = _submitCheckIn(false, true, true); // AI가 안전모 미착용 판정
+        SafetyGate.Override memory o = _override(target, 1);
+        gate.submitOverride(o, _signOverride(o, supervisorPk));
 
-        SafetyGate.SiteRecord memory r = _sampleSiteRecord(keccak256("site-record-nonce-1"));
+        SafetyGate.StoredCheckIn memory s = gate.getCheckIn(target);
+        assertTrue(s.overridden);
+        assertEq(s.overrideReason, 1);
+        assertEq(s.overriddenBy, supervisor);
+        assertFalse(s.data.helmetPass); // 원래 AI 판정은 그대로 남는다
+        assertEq(gate.getSiteStats(SITE_ID).overrides, 1);
+    }
+
+    function test_override_deviceKeyCannotOverride() public {
+        bytes32 target = _submitCheckIn(false, true, true);
+        SafetyGate.Override memory o = _override(target, 1);
+        bytes memory sig = _signOverride(o, devicePk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, device, gate.SUPERVISOR_ROLE()));
+        gate.submitOverride(o, sig);
+    }
+
+    function test_override_cannotOverridePassingCheckIn() public {
+        bytes32 target = _submitCheckIn(true, true, true);
+        SafetyGate.Override memory o = _override(target, 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.CheckInNotFailed.selector, target));
+        gate.submitOverride(o, sig);
+    }
+
+    function test_override_cannotBypassAlcoholFail() public {
+        bytes32 target = _submitCheckIn(true, true, false);
+        SafetyGate.Override memory o = _override(target, 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.AlcoholFailCannotBeOverridden.selector, target));
+        gate.submitOverride(o, sig);
+    }
+
+    function test_override_onlyOnce() public {
+        bytes32 target = _submitCheckIn(true, false, true);
+        SafetyGate.Override memory o1 = _override(target, 3);
+        gate.submitOverride(o1, _signOverride(o1, supervisorPk));
+        SafetyGate.Override memory o2 = _override(target, 1);
+        bytes memory sig = _signOverride(o2, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.AlreadyOverridden.selector, target));
+        gate.submitOverride(o2, sig);
+    }
+
+    function test_override_reasonCodeRequired() public {
+        bytes32 target = _submitCheckIn(false, true, true);
+        SafetyGate.Override memory o = _override(target, 0);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 0));
+        gate.submitOverride(o, sig);
+    }
+
+    function test_override_unknownCheckInRejected() public {
+        bytes32 missing = keccak256("missing");
+        SafetyGate.Override memory o = _override(missing, 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.CheckInNotFound.selector, missing));
+        gate.submitOverride(o, sig);
+    }
+
+    // ==================================================================
+    // 4. 위험성평가
+    // ==================================================================
+
+    function test_siteRecord_supervisorSubmits() public {
+        SafetyGate.SiteRecord memory r = _siteRecord(_nonce());
+        gate.submitSiteRecord(r, _signSiteRecord(r, supervisorPk));
+        SafetyGate.StoredSiteRecord memory s = gate.getSiteRecord(r.nonce);
+        assertEq(s.supervisor, supervisor);
+        assertEq(s.data.recordHash, keccak256("risk-assessment"));
+        assertEq(gate.getSiteRecords(SITE_ID, 0, 10).length, 1);
+    }
+
+    function test_siteRecord_deviceKeyRejected() public {
+        SafetyGate.SiteRecord memory r = _siteRecord(_nonce());
         bytes memory sig = _signSiteRecord(r, devicePk);
-
-        vm.expectEmit(true, false, false, true);
-        emit SafetyGate.SiteRecordSubmitted(r.siteId, 0, true, device);
-
-        gate.submitSiteRecord(r, sig);
-
-        assertTrue(gate.isNonceUsed(r.nonce));
-
-        SafetyGate.SiteRecord[] memory records = gate.getSiteRecords(SITE_ID, 0, 1);
-        assertEq(records.length, 1);
-        assertEq(records[0].recordHash, r.recordHash);
-        assertEq(records[0].caseId, CASE_ID);
-        assertEq(records[0].hazardsControlled, true);
-    }
-
-    function test_submitSiteRecord_revertsOnReusedNonce() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.SiteRecord memory r = _sampleSiteRecord(keccak256("site-record-nonce-replay"));
-        bytes memory sig = _signSiteRecord(r, devicePk);
-
-        gate.submitSiteRecord(r, sig);
-
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, device, gate.SUPERVISOR_ROLE()));
         gate.submitSiteRecord(r, sig);
     }
 
-    function test_submitSiteRecord_and_submitCheckIn_shareNoncePool() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        bytes32 sharedNonce = keccak256("shared-nonce");
-
-        SafetyGate.CheckIn memory c = _sampleCheckIn(sharedNonce);
-        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
-
-        SafetyGate.SiteRecord memory r = _sampleSiteRecord(sharedNonce);
-        vm.expectRevert();
-        gate.submitSiteRecord(r, _signSiteRecord(r, devicePk));
-    }
-
-    function test_submitSiteRecord_revertsOnUnregisteredDevice() public {
-        SafetyGate.SiteRecord memory r = _sampleSiteRecord(keccak256("site-record-nonce-unreg"));
-        bytes memory sig = _signSiteRecord(r, otherDevicePk);
-
-        vm.expectRevert();
+    function test_siteRecord_backdatedRejected() public {
+        SafetyGate.SiteRecord memory r = _siteRecord(_nonce());
+        r.timestamp = uint64(block.timestamp - 7 days);
+        bytes memory sig = _signSiteRecord(r, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, r.timestamp, uint64(block.timestamp))
+        );
         gate.submitSiteRecord(r, sig);
     }
 
-    function test_submitSiteRecord_revertsOnTamperedPayload() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.SiteRecord memory r = _sampleSiteRecord(keccak256("site-record-nonce-tamper"));
-        bytes memory sig = _signSiteRecord(r, devicePk);
-
-        r.hazardsControlled = false; // tamper after signing
-
-        vm.expectRevert();
+    function test_noncePool_sharedAcrossRecordTypes() public {
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        SafetyGate.SiteRecord memory r = _siteRecord(nonce);
+        bytes memory sig = _signSiteRecord(r, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.NonceAlreadyUsed.selector, nonce));
         gate.submitSiteRecord(r, sig);
     }
 
-    function test_getSiteRecords_rangeAcrossMultiple() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
+    // ==================================================================
+    // 5. Case 확정: 시공사 제출 → 감리 → 발주처
+    // ==================================================================
 
-        SafetyGate.SiteRecord memory r1 = _sampleSiteRecord(keccak256("site-record-a"));
-        gate.submitSiteRecord(r1, _signSiteRecord(r1, devicePk));
+    function test_case_fullFlow_finalizedAfterInspectorAndOwner() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        assertEq(uint8(gate.getCase(CASE_ID).status), uint8(SafetyGate.CaseStatus.Submitted));
+        _act(2, 0, SCOPE, inspectorPk);
+        assertEq(uint8(gate.getCase(CASE_ID).status), uint8(SafetyGate.CaseStatus.InspectorApproved));
+        _act(2, 0, SCOPE, ownerPk);
+        assertEq(uint8(gate.getCase(CASE_ID).status), uint8(SafetyGate.CaseStatus.Finalized));
 
-        SafetyGate.SiteRecord memory r2 = _sampleSiteRecord(keccak256("site-record-b"));
-        gate.submitSiteRecord(r2, _signSiteRecord(r2, devicePk));
-
-        SafetyGate.SiteRecord[] memory records = gate.getSiteRecords(SITE_ID, 0, 2);
-        assertEq(records.length, 2);
-        assertEq(records[0].nonce, r1.nonce);
-        assertEq(records[1].nonce, r2.nonce);
+        SafetyGate.CaseHistoryEntry[] memory h = gate.getCaseHistory(CASE_ID);
+        assertEq(h.length, 3);
+        assertEq(h[0].actor, supervisor);
+        assertEq(h[1].actor, inspector);
+        assertEq(h[2].actor, owner);
     }
 
-    // ---- submitCaseReview (감독자 최종 서명) ----
-
-    function test_submitCaseReview_success() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.CaseReview memory r = _sampleCaseReview(keccak256("case-review-nonce-1"));
-        bytes memory sig = _signCaseReview(r, devicePk);
-
-        vm.expectEmit(true, false, false, true);
-        emit SafetyGate.CaseReviewSubmitted(r.caseId, 0, true, device);
-
-        gate.submitCaseReview(r, sig);
-
-        assertTrue(gate.isNonceUsed(r.nonce));
-
-        SafetyGate.CaseReview[] memory reviews = gate.getCaseReviews(CASE_ID, 0, 1);
-        assertEq(reviews.length, 1);
-        assertEq(reviews[0].reviewScopeHash, r.reviewScopeHash);
-        assertEq(reviews[0].reviewResult, true);
+    function test_case_contractorCannotFinalizeAlone() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, SCOPE);
+        bytes memory sig = _signCaseAction(a, supervisorPk); // 감독자가 스스로 승인 시도
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, supervisor, gate.INSPECTOR_ROLE()));
+        gate.submitCaseAction(a, sig);
     }
 
-    function test_submitCaseReview_revertsOnReusedNonce() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.CaseReview memory r = _sampleCaseReview(keccak256("case-review-nonce-replay"));
-        bytes memory sig = _signCaseReview(r, devicePk);
-
-        gate.submitCaseReview(r, sig);
-
-        vm.expectRevert();
-        gate.submitCaseReview(r, sig);
+    function test_case_ownerCannotSkipInspector() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, SCOPE);
+        bytes memory sig = _signCaseAction(a, ownerPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, owner, gate.INSPECTOR_ROLE()));
+        gate.submitCaseAction(a, sig);
     }
 
-    function test_submitCaseReview_sharesNoncePoolWithOthers() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
+    function test_case_rejectThenResubmit_historyPreserved() public {
+        bytes32 scope2 = keccak256("nonces-after-fix");
+        _act(1, 0, SCOPE, supervisorPk);
+        _act(3, 4, SCOPE, inspectorPk); // 감리 반려 (사유 코드 4: 재검사 요구)
+        assertEq(uint8(gate.getCase(CASE_ID).status), uint8(SafetyGate.CaseStatus.Rejected));
 
-        bytes32 sharedNonce = keccak256("shared-nonce-review");
+        _act(1, 0, scope2, supervisorPk); // 재제출
+        SafetyGate.CaseState memory c = gate.getCase(CASE_ID);
+        assertEq(uint8(c.status), uint8(SafetyGate.CaseStatus.Submitted));
+        assertEq(c.round, 2);
+        assertEq(c.scopeHash, scope2);
 
-        SafetyGate.SiteRecord memory sr = _sampleSiteRecord(sharedNonce);
-        gate.submitSiteRecord(sr, _signSiteRecord(sr, devicePk));
-
-        SafetyGate.CaseReview memory r = _sampleCaseReview(sharedNonce);
-        vm.expectRevert();
-        gate.submitCaseReview(r, _signCaseReview(r, devicePk));
+        SafetyGate.CaseHistoryEntry[] memory h = gate.getCaseHistory(CASE_ID);
+        assertEq(h.length, 3);
+        assertEq(h[1].action, 3);
+        assertEq(h[1].reasonCode, 4);
+        assertEq(h[1].scopeHash, SCOPE); // 반려된 원래 범위도 남아 있다
     }
 
-    function test_submitCaseReview_revertsOnUnregisteredDevice() public {
-        SafetyGate.CaseReview memory r = _sampleCaseReview(keccak256("case-review-nonce-unreg"));
-        bytes memory sig = _signCaseReview(r, otherDevicePk);
-
-        vm.expectRevert();
-        gate.submitCaseReview(r, sig);
+    function test_case_rejectRequiresReason() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(3, 0, SCOPE);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 0));
+        gate.submitCaseAction(a, sig);
     }
 
-    function test_submitCaseReview_revertsOnTamperedPayload() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
-
-        SafetyGate.CaseReview memory r = _sampleCaseReview(keccak256("case-review-nonce-tamper"));
-        bytes memory sig = _signCaseReview(r, devicePk);
-
-        r.reviewResult = false; // tamper after signing
-
-        vm.expectRevert();
-        gate.submitCaseReview(r, sig);
+    function test_case_approveMustMatchSubmittedScope() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        bytes32 other = keccak256("different-scope");
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, other);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.ScopeMismatch.selector, SCOPE, other));
+        gate.submitCaseAction(a, sig);
     }
 
-    function test_getCaseReviews_rangeAcrossMultiple() public {
-        vm.prank(admin);
-        gate.registerDevice(device);
+    function test_case_finalizedIsImmutable() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        _act(2, 0, SCOPE, inspectorPk);
+        _act(2, 0, SCOPE, ownerPk);
+        SafetyGate.CaseAction memory a = _caseAction(1, 0, keccak256("rewrite"));
+        bytes memory sig = _signCaseAction(a, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.InvalidCaseTransition.selector, SafetyGate.CaseStatus.Finalized, 1)
+        );
+        gate.submitCaseAction(a, sig);
+    }
 
-        SafetyGate.CaseReview memory r1 = _sampleCaseReview(keccak256("case-review-a"));
-        gate.submitCaseReview(r1, _signCaseReview(r1, devicePk));
-
-        SafetyGate.CaseReview memory r2 = _sampleCaseReview(keccak256("case-review-b"));
-        gate.submitCaseReview(r2, _signCaseReview(r2, devicePk));
-
-        SafetyGate.CaseReview[] memory reviews = gate.getCaseReviews(CASE_ID, 0, 2);
-        assertEq(reviews.length, 2);
-        assertEq(reviews[0].nonce, r1.nonce);
-        assertEq(reviews[1].nonce, r2.nonce);
+    function test_case_cannotApproveBeforeSubmit() public {
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, SCOPE);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.InvalidCaseTransition.selector, SafetyGate.CaseStatus.None, 2)
+        );
+        gate.submitCaseAction(a, sig);
     }
 }

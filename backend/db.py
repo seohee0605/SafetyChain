@@ -1,9 +1,11 @@
-"""SQLite 저장소.
+"""SQLite 저장소 (오프체인 원본).
 
-CLAUDE.md 절대 원칙 3: 실명·연락처는 온체인에 절대 올리지 않는다.
+설계 원칙: 실명·연락처는 온체인에 올리지 않는다.
 workers 테이블(실명 매핑)과 sites 테이블(가명화 salt)은 이 파일에만 존재하고
 체인에는 절대 넘기지 않는다. checkins 테이블도 alcoholPass는 bool만 저장한다
-(원칙 2: 음주 수치는 로그에도 남기지 않는다).
+(음주 수치는 로그에도 남기지 않는다).
+
+이 DB는 "원본 보관소"일 뿐 신뢰 기준이 아니다. 검증 API는 항상 온체인 값과 대조한다.
 """
 import secrets
 import sqlite3
@@ -43,8 +45,21 @@ CREATE TABLE IF NOT EXISTS checkins (
     shoes_pass INTEGER NOT NULL,
     alcohol_pass INTEGER NOT NULL,  -- bool만. 수치는 어디에도 저장하지 않는다.
     model_hash TEXT NOT NULL,
+    evidence_hash TEXT,            -- 검사 사진 SHA-256 (온체인에도 기록)
+    image_path TEXT,               -- 사진 원본 위치 (오프체인)
     device_address TEXT NOT NULL,
     signature TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+
+-- 감독자 Manual Override. AI 보호구 불합격을 사유 코드와 함께 수동 처리한 기록.
+CREATE TABLE IF NOT EXISTS overrides (
+    nonce TEXT PRIMARY KEY,
+    checkin_nonce TEXT NOT NULL,
+    reason_code INTEGER NOT NULL,
+    supervisor_address TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    tx_hash TEXT NOT NULL,
     timestamp INTEGER NOT NULL
 );
 
@@ -65,18 +80,18 @@ CREATE TABLE IF NOT EXISTS site_records (
     timestamp INTEGER NOT NULL
 );
 
--- 감독자(안전관리자)의 케이스 최종 검토·서명. review_scope_hash가 그 시점에 검토한
--- site_records/checkins nonce 목록을 고정해서, 나중에 검토 범위를 몰래 넓히지 못하게 한다.
-CREATE TABLE IF NOT EXISTS case_reviews (
+-- Case 제출·승인·반려 이력. 제출(submit) 행에는 검토 범위(nonce 목록)를 원문으로 남겨서
+-- 온체인 scopeHash와 다시 대조할 수 있게 한다.
+CREATE TABLE IF NOT EXISTS case_actions (
     nonce TEXT PRIMARY KEY,
     case_id TEXT NOT NULL,
-    tx_hash TEXT NOT NULL,
-    reviewed_site_record_nonces TEXT NOT NULL,  -- JSON 배열
-    reviewed_checkin_nonces TEXT NOT NULL,      -- JSON 배열
-    review_scope_hash TEXT NOT NULL,
-    review_result INTEGER NOT NULL,
-    device_address TEXT NOT NULL,
+    action INTEGER NOT NULL,           -- 1 제출, 2 승인, 3 반려
+    reason_code INTEGER NOT NULL,
+    scope_hash TEXT NOT NULL,
+    scope_json TEXT,                   -- 제출 시점의 기록 nonce 목록 (submit일 때만)
+    signer_address TEXT NOT NULL,
     signature TEXT NOT NULL,
+    tx_hash TEXT NOT NULL,
     timestamp INTEGER NOT NULL
 );
 """
@@ -98,6 +113,11 @@ def get_conn():
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # 이전 버전 DB 파일에 새 컬럼 추가
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkins)")}
+        for col in ("evidence_hash", "image_path"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE checkins ADD COLUMN {col} TEXT")
 
 
 def get_or_create_site_salt(site_id: str) -> str:
@@ -154,13 +174,15 @@ def record_checkin(
     device_address: str,
     signature: str,
     timestamp: int,
+    evidence_hash: str,
+    image_path: str,
 ) -> None:
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO checkins
                (nonce, case_id, site_id, worker_id_hash, tx_hash, helmet_pass, shoes_pass,
-                alcohol_pass, model_hash, device_address, signature, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                alcohol_pass, model_hash, device_address, signature, timestamp, evidence_hash, image_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 nonce,
                 case_id,
@@ -174,6 +196,8 @@ def record_checkin(
                 device_address,
                 signature,
                 timestamp,
+                evidence_hash,
+                image_path,
             ),
         )
 
@@ -246,48 +270,64 @@ def list_site_records_by_case(case_id: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def record_case_review(
+def record_override(
+    nonce: str, checkin_nonce: str, reason_code: int, supervisor_address: str, signature: str, tx_hash: str, timestamp: int
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO overrides
+               (nonce, checkin_nonce, reason_code, supervisor_address, signature, tx_hash, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (nonce, checkin_nonce, reason_code, supervisor_address, signature, tx_hash, timestamp),
+        )
+
+
+def get_override_for_checkin(checkin_nonce: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM overrides WHERE checkin_nonce = ?", (checkin_nonce,)).fetchone()
+
+
+def list_overrides_by_case(case_id: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT o.* FROM overrides o JOIN checkins c ON c.nonce = o.checkin_nonce
+               WHERE c.case_id = ? ORDER BY o.timestamp DESC""",
+            (case_id,),
+        ).fetchall()
+
+
+def record_case_action(
     nonce: str,
     case_id: str,
-    tx_hash: str,
-    reviewed_site_record_nonces: str,
-    reviewed_checkin_nonces: str,
-    review_scope_hash: str,
-    review_result: bool,
-    device_address: str,
+    action: int,
+    reason_code: int,
+    scope_hash: str,
+    scope_json: str | None,
+    signer_address: str,
     signature: str,
+    tx_hash: str,
     timestamp: int,
 ) -> None:
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO case_reviews
-               (nonce, case_id, tx_hash, reviewed_site_record_nonces, reviewed_checkin_nonces,
-                review_scope_hash, review_result, device_address, signature, timestamp)
+            """INSERT INTO case_actions
+               (nonce, case_id, action, reason_code, scope_hash, scope_json, signer_address, signature, tx_hash, timestamp)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                nonce,
-                case_id,
-                tx_hash,
-                reviewed_site_record_nonces,
-                reviewed_checkin_nonces,
-                review_scope_hash,
-                int(review_result),
-                device_address,
-                signature,
-                timestamp,
-            ),
+            (nonce, case_id, action, reason_code, scope_hash, scope_json, signer_address, signature, tx_hash, timestamp),
         )
 
 
-def get_case_review(nonce: str) -> sqlite3.Row | None:
-    with get_conn() as conn:
-        return conn.execute("SELECT * FROM case_reviews WHERE nonce = ?", (nonce,)).fetchone()
-
-
-def list_case_reviews(case_id: str) -> list[sqlite3.Row]:
+def latest_case_submission(case_id: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM case_reviews WHERE case_id = ? ORDER BY timestamp DESC", (case_id,)
+            "SELECT * FROM case_actions WHERE case_id = ? AND action = 1 ORDER BY timestamp DESC LIMIT 1", (case_id,)
+        ).fetchone()
+
+
+def list_case_actions(case_id: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM case_actions WHERE case_id = ? ORDER BY timestamp ASC", (case_id,)
         ).fetchall()
 
 

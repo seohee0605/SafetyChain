@@ -3,7 +3,17 @@
     "type": "constructor",
     "inputs": [
       {
-        "name": "admin",
+        "name": "contractorAdmin",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "inspector",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "owner",
         "type": "address",
         "internalType": "address"
       }
@@ -12,7 +22,46 @@
   },
   {
     "type": "function",
-    "name": "ADMIN_ROLE",
+    "name": "ACTION_APPROVE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ACTION_REJECT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ACTION_SUBMIT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "CONTRACTOR_ADMIN_ROLE",
     "inputs": [],
     "outputs": [
       {
@@ -35,6 +84,154 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "GATE_DEVICE_ROLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "INSPECTOR_ROLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_CLOCK_SKEW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_SIGNATURE_AGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "OVERRIDE_CAMERA_FAULT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "OVERRIDE_FALSE_POSITIVE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "OVERRIDE_REASON_MAX",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "OVERRIDE_REINSPECTED",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "OWNER_ROLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "SUPERVISOR_ROLE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "approveSigner",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sig",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -81,44 +278,80 @@
   },
   {
     "type": "function",
-    "name": "getCaseReviews",
+    "name": "getCase",
     "inputs": [
       {
         "name": "caseId",
         "type": "bytes32",
         "internalType": "bytes32"
-      },
+      }
+    ],
+    "outputs": [
       {
-        "name": "from",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.CaseState",
+        "components": [
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum SafetyGate.CaseStatus"
+          },
+          {
+            "name": "scopeHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "round",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getCaseHistory",
+    "inputs": [
       {
-        "name": "to",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "caseId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
       {
         "name": "",
         "type": "tuple[]",
-        "internalType": "struct SafetyGate.CaseReview[]",
+        "internalType": "struct SafetyGate.CaseHistoryEntry[]",
         "components": [
           {
-            "name": "caseId",
+            "name": "action",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "reasonCode",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "scopeHash",
             "type": "bytes32",
             "internalType": "bytes32"
           },
           {
-            "name": "reviewScopeHash",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "actor",
+            "type": "address",
+            "internalType": "address"
           },
           {
-            "name": "reviewResult",
-            "type": "bool",
-            "internalType": "bool"
+            "name": "actorRole",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "nonce",
@@ -126,7 +359,115 @@
             "internalType": "bytes32"
           },
           {
-            "name": "timestamp",
+            "name": "anchoredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getCheckIn",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.StoredCheckIn",
+        "components": [
+          {
+            "name": "data",
+            "type": "tuple",
+            "internalType": "struct SafetyGate.CheckIn",
+            "components": [
+              {
+                "name": "caseId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "workerId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "siteId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "helmetPass",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "shoesPass",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "alcoholPass",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "modelHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "evidenceHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "nonce",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "timestamp",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
+          },
+          {
+            "name": "device",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "anchoredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "overridden",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "overrideReason",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "overriddenBy",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "overriddenAt",
             "type": "uint64",
             "internalType": "uint64"
           }
@@ -159,52 +500,140 @@
       {
         "name": "",
         "type": "tuple[]",
-        "internalType": "struct SafetyGate.CheckIn[]",
+        "internalType": "struct SafetyGate.StoredCheckIn[]",
         "components": [
           {
-            "name": "caseId",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "data",
+            "type": "tuple",
+            "internalType": "struct SafetyGate.CheckIn",
+            "components": [
+              {
+                "name": "caseId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "workerId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "siteId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "helmetPass",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "shoesPass",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "alcoholPass",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "modelHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "evidenceHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "nonce",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "timestamp",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
           },
           {
-            "name": "workerId",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "device",
+            "type": "address",
+            "internalType": "address"
           },
           {
-            "name": "siteId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "helmetPass",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "shoesPass",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "alcoholPass",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "modelHash",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "nonce",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "timestamp",
+            "name": "anchoredAt",
             "type": "uint64",
             "internalType": "uint64"
+          },
+          {
+            "name": "overridden",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "overrideReason",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "overriddenBy",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "overriddenAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getProposal",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.SignerProposal",
+        "components": [
+          {
+            "name": "role",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "proposer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "executed",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "approvedBy",
+            "type": "address",
+            "internalType": "address"
           }
         ]
       }
@@ -226,6 +655,74 @@
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getSiteRecord",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.StoredSiteRecord",
+        "components": [
+          {
+            "name": "data",
+            "type": "tuple",
+            "internalType": "struct SafetyGate.SiteRecord",
+            "components": [
+              {
+                "name": "caseId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "siteId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "recordHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "hazardsControlled",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "nonce",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "timestamp",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
+          },
+          {
+            "name": "supervisor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "anchoredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -254,35 +751,88 @@
       {
         "name": "",
         "type": "tuple[]",
-        "internalType": "struct SafetyGate.SiteRecord[]",
+        "internalType": "struct SafetyGate.StoredSiteRecord[]",
         "components": [
           {
-            "name": "caseId",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "data",
+            "type": "tuple",
+            "internalType": "struct SafetyGate.SiteRecord",
+            "components": [
+              {
+                "name": "caseId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "siteId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "recordHash",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "hazardsControlled",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "nonce",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "timestamp",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
           },
           {
-            "name": "siteId",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "supervisor",
+            "type": "address",
+            "internalType": "address"
           },
           {
-            "name": "recordHash",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "anchoredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getSiteStats",
+    "inputs": [
+      {
+        "name": "siteId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.SiteStats",
+        "components": [
+          {
+            "name": "checkIns",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
-            "name": "hazardsControlled",
-            "type": "bool",
-            "internalType": "bool"
+            "name": "failed",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
-            "name": "nonce",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "timestamp",
+            "name": "overrides",
             "type": "uint64",
             "internalType": "uint64"
           }
@@ -354,35 +904,40 @@
   },
   {
     "type": "function",
-    "name": "registerDevice",
-    "inputs": [
+    "name": "proposalCount",
+    "inputs": [],
+    "outputs": [
       {
-        "name": "device",
-        "type": "address",
-        "internalType": "address"
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
+    "stateMutability": "view"
   },
   {
     "type": "function",
-    "name": "registeredDevices",
+    "name": "proposeSigner",
     "inputs": [
       {
-        "name": "device",
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
         "type": "address",
         "internalType": "address"
       }
     ],
     "outputs": [
       {
-        "name": "registered",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -395,19 +950,6 @@
       },
       {
         "name": "callerConfirmation",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "revokeDevice",
-    "inputs": [
-      {
-        "name": "device",
         "type": "address",
         "internalType": "address"
       }
@@ -435,12 +977,49 @@
   },
   {
     "type": "function",
-    "name": "submitCaseReview",
+    "name": "revokeSigner",
     "inputs": [
       {
-        "name": "r",
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "signerApprovalDigest",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "submitCaseAction",
+    "inputs": [
+      {
+        "name": "a",
         "type": "tuple",
-        "internalType": "struct SafetyGate.CaseReview",
+        "internalType": "struct SafetyGate.CaseAction",
         "components": [
           {
             "name": "caseId",
@@ -448,14 +1027,19 @@
             "internalType": "bytes32"
           },
           {
-            "name": "reviewScopeHash",
+            "name": "scopeHash",
             "type": "bytes32",
             "internalType": "bytes32"
           },
           {
-            "name": "reviewResult",
-            "type": "bool",
-            "internalType": "bool"
+            "name": "action",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "reasonCode",
+            "type": "uint8",
+            "internalType": "uint8"
           },
           {
             "name": "nonce",
@@ -521,6 +1105,51 @@
             "name": "modelHash",
             "type": "bytes32",
             "internalType": "bytes32"
+          },
+          {
+            "name": "evidenceHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "nonce",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "timestamp",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      },
+      {
+        "name": "sig",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "submitOverride",
+    "inputs": [
+      {
+        "name": "o",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.Override",
+        "components": [
+          {
+            "name": "checkInNonce",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "reasonCode",
+            "type": "uint8",
+            "internalType": "uint8"
           },
           {
             "name": "nonce",
@@ -614,7 +1243,7 @@
   },
   {
     "type": "event",
-    "name": "CaseReviewSubmitted",
+    "name": "CaseActionRecorded",
     "inputs": [
       {
         "name": "caseId",
@@ -623,19 +1252,25 @@
         "internalType": "bytes32"
       },
       {
-        "name": "idx",
-        "type": "uint256",
+        "name": "action",
+        "type": "uint8",
         "indexed": false,
-        "internalType": "uint256"
+        "internalType": "uint8"
       },
       {
-        "name": "reviewResult",
-        "type": "bool",
+        "name": "reasonCode",
+        "type": "uint8",
         "indexed": false,
-        "internalType": "bool"
+        "internalType": "uint8"
       },
       {
-        "name": "device",
+        "name": "newStatus",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum SafetyGate.CaseStatus"
+      },
+      {
+        "name": "actor",
         "type": "address",
         "indexed": false,
         "internalType": "address"
@@ -660,10 +1295,10 @@
         "internalType": "bytes32"
       },
       {
-        "name": "idx",
-        "type": "uint256",
+        "name": "nonce",
+        "type": "bytes32",
         "indexed": false,
-        "internalType": "uint256"
+        "internalType": "bytes32"
       },
       {
         "name": "allPassed",
@@ -684,6 +1319,37 @@
     "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OverrideRecorded",
+    "inputs": [
+      {
+        "name": "siteId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "checkInNonce",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reasonCode",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "supervisor",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
     "anonymous": false
   },
   {
@@ -763,6 +1429,68 @@
   },
   {
     "type": "event",
+    "name": "SignerApproved",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "role",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "approver",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SignerProposed",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "role",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "proposer",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SiteRecordSubmitted",
     "inputs": [
       {
@@ -772,10 +1500,10 @@
         "internalType": "bytes32"
       },
       {
-        "name": "idx",
-        "type": "uint256",
+        "name": "nonce",
+        "type": "bytes32",
         "indexed": false,
-        "internalType": "uint256"
+        "internalType": "bytes32"
       },
       {
         "name": "hazardsControlled",
@@ -784,7 +1512,7 @@
         "internalType": "bool"
       },
       {
-        "name": "device",
+        "name": "supervisor",
         "type": "address",
         "indexed": false,
         "internalType": "address"
@@ -808,6 +1536,50 @@
       },
       {
         "name": "neededRole",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AlcoholFailCannotBeOverridden",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AlreadyOverridden",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CheckInNotFailed",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CheckInNotFound",
+    "inputs": [
+      {
+        "name": "nonce",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -842,8 +1614,51 @@
   },
   {
     "type": "error",
+    "name": "InvalidCaseTransition",
+    "inputs": [
+      {
+        "name": "status",
+        "type": "uint8",
+        "internalType": "enum SafetyGate.CaseStatus"
+      },
+      {
+        "name": "action",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidReason",
+    "inputs": [
+      {
+        "name": "reasonCode",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidShortString",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MissingRole",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
   },
   {
     "type": "error",
@@ -858,23 +1673,77 @@
   },
   {
     "type": "error",
+    "name": "ProposalAlreadyExecuted",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ProposalNotFound",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RoleNotAssignable",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ScopeMismatch",
+    "inputs": [
+      {
+        "name": "expected",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "given",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "StaleTimestamp",
+    "inputs": [
+      {
+        "name": "signedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "blockTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "StringTooLong",
     "inputs": [
       {
         "name": "str",
         "type": "string",
         "internalType": "string"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "UnregisteredDevice",
-    "inputs": [
-      {
-        "name": "device",
-        "type": "address",
-        "internalType": "address"
       }
     ]
   }

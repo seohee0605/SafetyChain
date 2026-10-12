@@ -37,3 +37,8 @@ def _parse_admin_signers(raw: str) -> dict[str, str]:
 
 
 ADMIN_SIGNERS = _parse_admin_signers(os.environ.get("ADMIN_SIGNERS", ""))
+
+# 감리·발주처 서명 키 ("이름:0x키" 1개씩). 데모에서만 백엔드가 보관한다.
+# 실제 서비스에서는 각 기관이 자기 키로 서명한 값만 보낸다.
+INSPECTOR_SIGNER = _parse_admin_signers(os.environ.get("INSPECTOR_SIGNER", ""))
+OWNER_SIGNER = _parse_admin_signers(os.environ.get("OWNER_SIGNER", ""))

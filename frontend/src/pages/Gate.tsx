@@ -1,11 +1,22 @@
 import jsQR from 'jsqr'
 import QRCode from 'qrcode'
 import { useEffect, useRef, useState } from 'react'
-import { Card, ErrorText, Input, PageTitle, SecondaryButton, StepHeading, SuccessButton } from '../components/ui'
+import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StepHeading, SuccessButton } from '../components/ui'
 import { BACKEND_URL } from '../config'
 
 type QrIssue = { nonce: string; expiresAt: number }
-type GateResult = { txHash: string; verdict: boolean }
+type GateResult = {
+  txHash: string
+  verdict: boolean
+  nonce: string
+  helmetPass: boolean
+  shoesPass: boolean
+  alcoholPass: boolean
+  overridable: boolean
+}
+type Reason = { code: number; label: string }
+type Admin = { name: string; address: string }
+type OverrideResult = { txHash: string; reason: string }
 
 // 이 페이지는 "인부 화면"(QR 발급)과 "게이트 화면"(QR 스캔 + 촬영)을 한 브라우저에서
 // 시뮬레이션한다. 실제 배포에서는 QR은 인부 개인 폰에, 스캔/촬영은 게이트 기기에서 각각
@@ -33,12 +44,32 @@ export default function Gate() {
   const [result, setResult] = useState<GateResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [reasons, setReasons] = useState<Reason[]>([])
+  const [supervisors, setSupervisors] = useState<Admin[]>([])
+  const [reasonCode, setReasonCode] = useState(1)
+  const [supervisorName, setSupervisorName] = useState('')
+  const [overrideResult, setOverrideResult] = useState<OverrideResult | null>(null)
+  const [overriding, setOverriding] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const scanCanvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const scanFrameRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/reasons`)
+      .then((res) => res.json())
+      .then((r: { override: Reason[] }) => setReasons(r.override))
+      .catch(() => {})
+    fetch(`${BACKEND_URL}/admins`)
+      .then((res) => res.json())
+      .then((list: Admin[]) => {
+        setSupervisors(list)
+        if (list.length > 0) setSupervisorName(list[0].name)
+      })
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -50,6 +81,7 @@ export default function Gate() {
   async function issueQr() {
     setError(null)
     setResult(null)
+    setOverrideResult(null)
     setScannedNonce(null)
     const res = await fetch(`${BACKEND_URL}/qr/issue`, {
       method: 'POST',
@@ -162,6 +194,30 @@ export default function Gate() {
     }
   }
 
+  // AI 보호구 불합격을 감독자가 사유 코드와 함께 수동 처리 (Manual Override).
+  // 원래 AI 판정은 온체인에 그대로 남고, override 기록이 추가로 남는다.
+  async function submitOverride() {
+    if (!result) return
+    setOverriding(true)
+    setError(null)
+    try {
+      const res = await fetch(`${BACKEND_URL}/gate/override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce: result.nonce, reasonCode, supervisorName }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? '수동 처리 실패')
+      }
+      setOverrideResult(await res.json())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '알 수 없는 오류')
+    } finally {
+      setOverriding(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
       <PageTitle title="게이트 시뮬레이터" subtitle="QR 발급(인부 화면) → 스캔(게이트 화면) → 촬영 → 온체인 제출" />
@@ -239,9 +295,51 @@ export default function Gate() {
       {result && (
         <Card>
           <p className="font-display font-bold uppercase text-charcoal text-lg">
-            {result.verdict ? '✅ 통과' : '❌ 미통과'}
+            {result.verdict ? '✅ 출입 허용' : overrideResult ? '🟡 감독자 수동 승인 · 출입 허용' : '❌ 출입 차단'}
+          </p>
+          <p className="text-sm text-ink">
+            안전모 {result.helmetPass ? '✓' : '✗'} · 안전화 {result.shoesPass ? '✓' : '✗'} · 음주{' '}
+            {result.alcoholPass ? '✓' : '✗'}
           </p>
           <p className="text-xs font-mono break-all text-ink-muted">tx: {result.txHash}</p>
+          {!result.verdict && !result.alcoholPass && (
+            <p className="text-xs text-hazard-red font-semibold">음주 불합격은 AI 판정이 아니라 수동 처리할 수 없습니다.</p>
+          )}
+        </Card>
+      )}
+
+      {result && result.overridable && !overrideResult && (
+        <Card>
+          <StepHeading step={4}>감독자 수동 처리 (AI 오판 대응)</StepHeading>
+          <p className="text-xs text-ink-muted">
+            AI 판정 결과는 그대로 기록에 남고, 수동 처리 사유와 감독자 서명이 추가로 온체인에 기록됩니다. 수동 처리
+            건수는 현장 대시보드와 감리·발주처 검토 대상에 포함됩니다.
+          </p>
+          <Select value={reasonCode} onChange={(e) => setReasonCode(Number(e.target.value))}>
+            {reasons.map((r) => (
+              <option key={r.code} value={r.code}>
+                {r.label}
+              </option>
+            ))}
+          </Select>
+          <Select value={supervisorName} onChange={(e) => setSupervisorName(e.target.value)}>
+            {supervisors.length === 0 && <option value="">등록된 감독자 없음</option>}
+            {supervisors.map((a) => (
+              <option key={a.name} value={a.name}>
+                {a.name}
+              </option>
+            ))}
+          </Select>
+          <PrimaryButton onClick={submitOverride} disabled={!supervisorName || overriding} className="w-full">
+            {overriding ? '서명 중...' : '사유를 남기고 수동 승인'}
+          </PrimaryButton>
+        </Card>
+      )}
+
+      {overrideResult && (
+        <Card>
+          <p className="text-sm text-ink">수동 처리 사유: {overrideResult.reason}</p>
+          <p className="text-xs font-mono break-all text-ink-muted">tx: {overrideResult.txHash}</p>
         </Card>
       )}
     </div>

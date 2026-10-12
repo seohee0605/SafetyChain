@@ -3,6 +3,8 @@ import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Sele
 import { BACKEND_URL } from '../config'
 
 type Admin = { name: string; address: string }
+type Reviewer = { role: 'inspector' | 'owner'; name: string; address: string }
+type Reason = { code: number; label: string }
 
 type CheckInRow = {
   nonce: string
@@ -11,6 +13,8 @@ type CheckInRow = {
   shoesPass: boolean
   alcoholPass: boolean
   timestamp: number
+  overridden: boolean
+  overrideReason: string | null
 }
 
 type SiteRecordRow = {
@@ -21,29 +25,46 @@ type SiteRecordRow = {
   timestamp: number
 }
 
-type CaseBundle = { caseId: string; siteRecords: SiteRecordRow[]; checkIns: CheckInRow[] }
+type CaseStatus = 'None' | 'Submitted' | 'InspectorApproved' | 'Finalized' | 'Rejected'
 
-type ReviewRow = {
-  nonce: string
-  txHash: string
-  reviewResult: boolean
-  reviewedSiteRecordNonces: string[]
-  reviewedCheckinNonces: string[]
-  adminName: string
-  timestamp: number
+type HistoryRow = {
+  action: 'submit' | 'approve' | 'reject'
+  reasonCode: number
+  reason: string | null
+  actorName: string
+  anchoredAt: number
+}
+
+type CaseBundle = {
+  caseId: string
+  siteRecords: SiteRecordRow[]
+  checkIns: CheckInRow[]
+  state: { status: CaseStatus; scopeHash: string; round: number }
+  history: HistoryRow[]
 }
 
 const today = () => new Date().toISOString().slice(0, 10)
 
-// 감독자 최종 검토·서명: 위험성평가(SiteRecord)와 근로자 검사(CheckIn)를 caseId로
-// 하나로 묶어서 보여주고, 감독자가 그 범위 전체를 검토했다는 서명을 온체인에 남긴다.
+const STEPS: { key: CaseStatus[]; label: string }[] = [
+  { key: ['Submitted', 'InspectorApproved', 'Finalized'], label: '시공사 제출' },
+  { key: ['InspectorApproved', 'Finalized'], label: '감리 승인' },
+  { key: ['Finalized'], label: '발주처 승인 · 확정' },
+]
+
+const ACTION_LABEL = { submit: '제출', approve: '승인', reject: '반려' }
+
+// 하루치 기록(case) 확정: 시공사 감독자 제출 → 감리 승인 → 발주처 승인.
+// 어느 역할이 서명할 차례인지는 컨트랙트가 강제한다. 시공사가 혼자 확정하려 하면 거부되고,
+// 반려·재제출 이력은 모두 온체인에 남는다.
 export default function CaseReview() {
   const [admins, setAdmins] = useState<Admin[]>([])
+  const [reviewers, setReviewers] = useState<Reviewer[]>([])
+  const [rejectReasons, setRejectReasons] = useState<Reason[]>([])
   const [adminName, setAdminName] = useState('')
+  const [rejectCode, setRejectCode] = useState(1)
   const [siteId, setSiteId] = useState('')
   const [workDate, setWorkDate] = useState(today())
   const [bundle, setBundle] = useState<CaseBundle | null>(null)
-  const [reviews, setReviews] = useState<ReviewRow[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -55,31 +76,35 @@ export default function CaseReview() {
         if (list.length > 0) setAdminName(list[0].name)
       })
       .catch(() => {})
+    fetch(`${BACKEND_URL}/reviewers`)
+      .then((res) => res.json())
+      .then(setReviewers)
+      .catch(() => {})
+    fetch(`${BACKEND_URL}/reasons`)
+      .then((res) => res.json())
+      .then((r: { reject: Reason[] }) => setRejectReasons(r.reject))
+      .catch(() => {})
   }, [])
 
   async function loadCase() {
     if (!siteId || !workDate) return
     setError(null)
-    const [caseRes, reviewRes] = await Promise.all([
-      fetch(`${BACKEND_URL}/case/${encodeURIComponent(siteId)}/${workDate}`),
-      fetch(`${BACKEND_URL}/case/reviews/${encodeURIComponent(siteId)}/${workDate}`),
-    ])
-    if (caseRes.ok) setBundle(await caseRes.json())
-    if (reviewRes.ok) setReviews(await reviewRes.json())
+    const res = await fetch(`${BACKEND_URL}/case/${encodeURIComponent(siteId)}/${workDate}`)
+    if (res.ok) setBundle(await res.json())
   }
 
-  async function submitReview(reviewResult: boolean) {
+  async function post(path: string, body: object) {
     setError(null)
     setLoading(true)
     try {
-      const res = await fetch(`${BACKEND_URL}/case/review`, {
+      const res = await fetch(`${BACKEND_URL}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteId, workDate, adminName, reviewResult }),
+        body: JSON.stringify({ siteId, workDate, ...body }),
       })
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.detail ?? '제출 실패')
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.detail ?? '제출 실패')
       }
       await loadCase()
     } catch (e) {
@@ -89,13 +114,18 @@ export default function CaseReview() {
     }
   }
 
+  const status = bundle?.state.status ?? 'None'
   const hasRecords = bundle && (bundle.siteRecords.length > 0 || bundle.checkIns.length > 0)
+  const canSubmit = status === 'None' || status === 'Rejected'
+  const turn: Reviewer['role'] | null =
+    status === 'Submitted' ? 'inspector' : status === 'InspectorApproved' ? 'owner' : null
+  const reviewer = reviewers.find((r) => r.role === turn)
 
   return (
     <div className="space-y-5">
       <PageTitle
-        title="케이스 검토 · 최종 서명"
-        subtitle="같은 현장·같은 작업일의 위험성평가와 근로자 검사를 하나로 묶어 감독자가 최종 확인합니다"
+        title="케이스 확정 · 다중 서명"
+        subtitle="시공사 제출 → 감리 승인 → 발주처 승인을 모두 거쳐야 하루치 기록이 확정됩니다"
       />
 
       <Card>
@@ -108,6 +138,27 @@ export default function CaseReview() {
           </SecondaryButton>
         </div>
       </Card>
+
+      {bundle && (
+        <Card>
+          <div className="flex gap-1.5">
+            {STEPS.map((s) => (
+              <div
+                key={s.label}
+                className={`flex-1 text-center text-xs font-display font-bold uppercase py-2 border-2 border-charcoal ${
+                  s.key.includes(status) ? 'bg-hazard-green text-white' : 'bg-paper-dark text-ink-muted'
+                }`}
+              >
+                {s.label}
+              </div>
+            ))}
+          </div>
+          {status === 'Rejected' && (
+            <p className="text-sm text-hazard-red font-semibold">반려됨 · 보완 후 재제출 필요 (제출 {bundle.state.round}회차)</p>
+          )}
+          {status === 'Finalized' && <p className="text-sm text-hazard-green font-semibold">최종 확정 · 더 이상 변경할 수 없습니다</p>}
+        </Card>
+      )}
 
       {bundle && (
         <Card>
@@ -133,17 +184,20 @@ export default function CaseReview() {
 
           <div>
             <p className="font-display font-bold uppercase text-sm text-charcoal mb-2">
-              근로자 검사 ({bundle.checkIns.length}건)
+              근로자 검사 ({bundle.checkIns.length}건 · 수동 처리 {bundle.checkIns.filter((c) => c.overridden).length}건)
             </p>
             {bundle.checkIns.length === 0 && <p className="text-sm text-ink-muted">없음</p>}
             {bundle.checkIns.map((c) => {
               const allPassed = c.helmetPass && c.shoesPass && c.alcoholPass
               return (
-                <div key={c.nonce} className="border-2 border-charcoal/20 p-2.5 mb-2 text-sm flex justify-between">
-                  <span className="text-ink-muted font-mono text-xs">{c.nonce.slice(0, 10)}...</span>
-                  <span className={allPassed ? 'text-hazard-green font-semibold' : 'text-hazard-red font-semibold'}>
-                    {allPassed ? '통과' : '미통과'}
-                  </span>
+                <div key={c.nonce} className="border-2 border-charcoal/20 p-2.5 mb-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-ink-muted font-mono text-xs">{c.nonce.slice(0, 10)}...</span>
+                    <span className={allPassed ? 'text-hazard-green font-semibold' : 'text-hazard-red font-semibold'}>
+                      {allPassed ? '통과' : c.overridden ? '불합격 → 수동 승인' : '불합격'}
+                    </span>
+                  </div>
+                  {c.overridden && <p className="text-xs text-ink-muted mt-1">수동 처리 사유: {c.overrideReason}</p>}
                 </div>
               )
             })}
@@ -151,11 +205,11 @@ export default function CaseReview() {
         </Card>
       )}
 
-      {bundle && (
+      {bundle && canSubmit && (
         <Card>
-          <StepHeading step={3}>감독자 최종 검토</StepHeading>
+          <StepHeading step={3}>시공사 감독자 제출</StepHeading>
           <Select value={adminName} onChange={(e) => setAdminName(e.target.value)}>
-            {admins.length === 0 && <option value="">등록된 안전관리자 없음</option>}
+            {admins.length === 0 && <option value="">등록된 감독자 없음</option>}
             {admins.map((a) => (
               <option key={a.name} value={a.name}>
                 {a.name}
@@ -163,15 +217,44 @@ export default function CaseReview() {
             ))}
           </Select>
           <p className="text-xs text-ink-muted">
-            지금 위에 보이는 위험성평가·검사 기록 전체를 검토 범위로 고정해서 서명합니다. 서명 이후 추가되는
-            기록은 이 서명에 포함되지 않습니다.
+            지금 보이는 기록 전체를 검토 범위로 고정해 제출합니다. 제출만으로는 확정되지 않고 감리·발주처 승인이 필요합니다.
           </p>
+          <PrimaryButton
+            onClick={() => post('/case/submit', { supervisorName: adminName })}
+            disabled={!hasRecords || !adminName || loading}
+            className="w-full"
+          >
+            {loading ? '서명 중...' : status === 'Rejected' ? '보완 후 재제출' : '제출'}
+          </PrimaryButton>
+        </Card>
+      )}
+
+      {bundle && turn && (
+        <Card>
+          <StepHeading step={3}>{turn === 'inspector' ? '감리 검토' : '발주처 최종 검토'}</StepHeading>
+          <p className="text-xs text-ink-muted">
+            서명자: {reviewer?.name ?? '설정되지 않음'} · 시공사가 제출한 범위 그대로 승인 또는 반려합니다.
+          </p>
+          <PrimaryButton
+            onClick={() => post('/case/review', { reviewer: turn, decision: 'approve' })}
+            disabled={!reviewer || loading}
+            className="w-full"
+          >
+            {loading ? '서명 중...' : '승인'}
+          </PrimaryButton>
           <div className="flex gap-2">
-            <PrimaryButton onClick={() => submitReview(true)} disabled={!hasRecords || !adminName || loading} className="flex-1">
-              {loading ? '서명 중...' : '승인 서명'}
-            </PrimaryButton>
-            <SecondaryButton onClick={() => submitReview(false)} disabled={!hasRecords || !adminName || loading} className="flex-1">
-              보류
+            <Select value={rejectCode} onChange={(e) => setRejectCode(Number(e.target.value))} className="flex-1">
+              {rejectReasons.map((r) => (
+                <option key={r.code} value={r.code}>
+                  {r.label}
+                </option>
+              ))}
+            </Select>
+            <SecondaryButton
+              onClick={() => post('/case/review', { reviewer: turn, decision: 'reject', reasonCode: rejectCode })}
+              disabled={!reviewer || loading}
+            >
+              반려
             </SecondaryButton>
           </div>
         </Card>
@@ -179,26 +262,25 @@ export default function CaseReview() {
 
       {error && <ErrorText>{error}</ErrorText>}
 
-      {reviews.length > 0 && (
+      {bundle && bundle.history.length > 0 && (
         <div className="space-y-2.5">
-          <h2 className="font-display font-bold uppercase tracking-wide text-charcoal text-lg">검토 이력</h2>
-          {reviews.map((r) => (
-            <Card key={r.nonce}>
+          <h2 className="font-display font-bold uppercase tracking-wide text-charcoal text-lg">온체인 이력 (삭제 불가)</h2>
+          {bundle.history.map((h, i) => (
+            <Card key={i}>
               <div className="flex justify-between items-center">
-                <span className="text-sm text-ink-muted">{new Date(r.timestamp * 1000).toLocaleString()}</span>
+                <span className="text-sm text-ink-muted">{new Date(h.anchoredAt * 1000).toLocaleString()}</span>
                 <span
                   className={`text-xs font-display font-bold uppercase px-2.5 py-1 border-2 border-charcoal text-white ${
-                    r.reviewResult ? 'bg-hazard-green' : 'bg-hazard-red'
+                    h.action === 'reject' ? 'bg-hazard-red' : 'bg-hazard-green'
                   }`}
                 >
-                  {r.reviewResult ? '승인' : '보류'}
+                  {ACTION_LABEL[h.action]}
                 </span>
               </div>
               <p className="text-xs text-ink-muted">
-                검토자: {r.adminName} · 위험성평가 {r.reviewedSiteRecordNonces.length}건 · 검사{' '}
-                {r.reviewedCheckinNonces.length}건
+                서명자: {h.actorName}
+                {h.reason ? ` · 반려 사유: ${h.reason}` : ''}
               </p>
-              <p className="text-xs font-mono break-all text-ink-muted">tx: {r.txHash}</p>
             </Card>
           ))}
         </div>

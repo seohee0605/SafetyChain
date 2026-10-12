@@ -13,6 +13,12 @@ type GateResult = { txHash: string; verdict: boolean }
 // 다르면(예: 화면 캡처를 잘못 보여줬을 때) 그대로 드러난다 — 이게 이 데모의 핵심 증명 포인트.
 const today = () => new Date().toISOString().slice(0, 10)
 
+// 데모 영상 촬영용 임시 모드. 실제 웹캠 대신 준비된 이미지를 사용해서
+// QR 스캔·촬영 장면을 깔끔하게 찍을 수 있게 한다. 판정은 그 이미지로 실제
+// 백엔드 YOLO 호출을 그대로 타므로 결과는 진짜다. 촬영 끝나면 false로 되돌릴 것.
+const DEMO_MODE = true
+const DEMO_CAPTURE_IMAGE = '/demo-helmet.jpg'
+
 export default function Gate() {
   const [workerId, setWorkerId] = useState('')
   const [siteId, setSiteId] = useState('')
@@ -60,6 +66,7 @@ export default function Gate() {
   }
 
   async function startCamera() {
+    if (DEMO_MODE) return
     setError(null)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true })
@@ -73,6 +80,15 @@ export default function Gate() {
   function startScan() {
     setError(null)
     setScanning(true)
+
+    if (DEMO_MODE) {
+      // 실제 스캔 대신 발급된 진짜 nonce를 그대로 사용 — 판정·제출은 이후 전부 실제 흐름.
+      setTimeout(() => {
+        if (qr) setScannedNonce(qr.nonce)
+        setScanning(false)
+      }, 1200)
+      return
+    }
 
     function tick() {
       const video = videoRef.current
@@ -99,7 +115,14 @@ export default function Gate() {
     scanFrameRef.current = requestAnimationFrame(tick)
   }
 
-  function capture() {
+  async function capture() {
+    if (DEMO_MODE) {
+      const res = await fetch(DEMO_CAPTURE_IMAGE)
+      const blob = await res.blob()
+      setCapturedBlob(blob)
+      setPreviewUrl(URL.createObjectURL(blob))
+      return
+    }
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!video || !canvas) return
@@ -167,11 +190,19 @@ export default function Gate() {
 
       <Card>
         <StepHeading step={2}>게이트 화면: QR 스캔 + 촬영</StepHeading>
-        <video ref={videoRef} autoPlay muted className="w-full bg-charcoal border-2 border-charcoal aspect-video object-cover" />
+        {DEMO_MODE ? (
+          <div className="w-full bg-charcoal border-2 border-charcoal aspect-video flex items-center justify-center">
+            {qrImageUrl && (
+              <img src={qrImageUrl} alt="게이트 카메라가 보는 QR" className="h-4/5 aspect-square object-contain" />
+            )}
+          </div>
+        ) : (
+          <video ref={videoRef} autoPlay muted className="w-full bg-charcoal border-2 border-charcoal aspect-video object-cover" />
+        )}
         <canvas ref={canvasRef} className="hidden" />
         <canvas ref={scanCanvasRef} className="hidden" />
         <div className="flex gap-2 flex-wrap">
-          <SecondaryButton onClick={startCamera}>웹캠 시작</SecondaryButton>
+          {!DEMO_MODE && <SecondaryButton onClick={startCamera}>웹캠 시작</SecondaryButton>}
           <SecondaryButton onClick={startScan} disabled={!qr || scanning}>
             {scanning ? 'QR 스캔 중...' : 'QR 스캔 시작'}
           </SecondaryButton>

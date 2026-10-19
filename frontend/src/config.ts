@@ -1,3 +1,3 @@
 export const BACKEND_URL = 'http://127.0.0.1:8000'
-export const RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com'
-export const CONTRACT_ADDRESS = '0x7f2d634Ea72C0fc50e16d2A504542DaCc398F3b7' as const
+export const RPC_URL = 'https://sepolia.drpc.org'
+export const CONTRACT_ADDRESS = '0xEE54363cC9E336B2ce1327dBe206D2514568cbC4' as const

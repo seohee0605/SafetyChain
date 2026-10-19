@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import CaseReview from './pages/CaseReview'
 import Dashboard from './pages/Dashboard'
 import Gate from './pages/Gate'
 import SiteRecord from './pages/SiteRecord'
 import Verify from './pages/Verify'
+import Worker from './pages/Worker'
 
 const PAGES = {
   gate: { label: '게이트', component: Gate },
@@ -11,13 +12,33 @@ const PAGES = {
   caseReview: { label: '케이스 검토', component: CaseReview },
   dashboard: { label: '대시보드', component: Dashboard },
   verify: { label: '검증', component: Verify },
+  worker: { label: '근로자 앱', component: Worker },
 } as const
 
 type PageKey = keyof typeof PAGES
 
+// #/gate, #/worker ... 주소로 화면을 고른다 (근로자 앱은 폰에서 #/worker 로 바로 연다)
+function pageFromHash(): PageKey {
+  const key = window.location.hash.replace(/^#\/?/, '')
+  return key in PAGES ? (key as PageKey) : 'gate'
+}
+
 function App() {
-  const [page, setPage] = useState<PageKey>('gate')
+  const [page, setPageState] = useState<PageKey>(pageFromHash)
   const Page = PAGES[page].component
+
+  useEffect(() => {
+    const onHash = () => setPageState(pageFromHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  const setPage = (key: PageKey) => {
+    window.location.hash = `/${key}`
+  }
+
+  // 근로자 앱은 폰 화면이라 관리용 헤더 없이 단독으로 띄운다
+  if (page === 'worker') return <Worker />
 
   return (
     <div className="min-h-screen bg-paper">

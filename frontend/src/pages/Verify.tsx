@@ -76,7 +76,7 @@ export default function Verify() {
       <div className="flex gap-2">
         <Input
           className="flex-1 font-mono text-sm"
-          placeholder="0x... nonce"
+          placeholder="검증 코드 (0x로 시작)"
           value={nonce}
           onChange={(e) => setNonce(e.target.value)}
         />
@@ -89,14 +89,14 @@ export default function Verify() {
 
       {site && (
         <Card>
-          <StatusBadge ok={site.onchain} label="온체인 기록 존재" />
-          <StatusBadge ok={site.sigValid} label="감독자 서명 = 온체인에 기록된 제출자" />
-          <StatusBadge ok={site.contentIntact} label="위험성평가 원문 해시 일치" />
+          <StatusBadge ok={site.onchain} label="블록체인에 기록돼 있음" />
+          <StatusBadge ok={site.sigValid} label="등록된 감독자가 서명함" />
+          <StatusBadge ok={site.contentIntact} label="위험성평가 원문이 바뀌지 않음" />
           {site.submittedBy && <p className="text-xs text-ink-muted">제출: {site.submittedBy}</p>}
           {directOnchain !== null && (
             <p className="text-xs text-ink-muted pt-3 border-t-2 border-charcoal/10">
-              체인 직접 확인 nonce 소진 = {directOnchain ? 'true' : 'false'}{' '}
-              {directOnchain === site.onchain ? '(백엔드 응답과 일치 ✅)' : '(불일치 ⚠️)'}
+              서버를 거치지 않고 블록체인에 직접 확인: {directOnchain ? '기록 있음' : '기록 없음'}{' '}
+              {directOnchain === site.onchain ? '(서버 응답과 일치 ✅)' : '(서버 응답과 불일치 ⚠️)'}
             </p>
           )}
         </Card>
@@ -104,11 +104,11 @@ export default function Verify() {
 
       {data && (
         <Card>
-          <StatusBadge ok={data.onchain} label="온체인 기록 존재 (nonce 소진)" />
-          <StatusBadge ok={data.sigValid} label="서명 검증 (승인 등록된 게이트 기기)" />
-          <StatusBadge ok={data.recordMatchesChain} label="DB 판정 결과 = 온체인 기록" />
-          <StatusBadge ok={data.evidenceIntact} label="검사 사진 원본 무결 (SHA-256 일치)" />
-          <StatusBadge ok={data.modelHashMatch} label="모델 해시 일치 (AI 모델 안 바뀜)" />
+          <StatusBadge ok={data.onchain} label="블록체인에 기록돼 있음" />
+          <StatusBadge ok={data.sigValid} label="승인 등록된 게이트 기기가 서명함" />
+          <StatusBadge ok={data.recordMatchesChain} label="서버에 저장된 판정 = 블록체인 기록" />
+          <StatusBadge ok={data.evidenceIntact} label="검사 사진 원본이 바뀌지 않음" />
+          <StatusBadge ok={data.modelHashMatch} label="판정에 쓴 AI 모델이 그대로임" />
           {data.anchoredAt ? (
             <p className="text-xs text-ink-muted">
               블록 기록 시각: {new Date(data.anchoredAt * 1000).toLocaleString()} (서명 시각이 아닌 블록 시각 기준)
@@ -121,8 +121,8 @@ export default function Verify() {
           )}
           {directOnchain !== null && (
             <p className="text-xs text-ink-muted pt-1 border-t-2 border-charcoal/10 mt-1 pt-3">
-              프론트가 백엔드 없이 체인에 직접 물어본 결과: nonce 소진 = {directOnchain ? 'true' : 'false'}{' '}
-              {directOnchain === data.onchain ? '(백엔드 응답과 일치 ✅)' : '(불일치 ⚠️)'}
+              서버를 거치지 않고 블록체인에 직접 확인: {directOnchain ? '기록 있음' : '기록 없음'}{' '}
+              {directOnchain === data.onchain ? '(서버 응답과 일치 ✅)' : '(서버 응답과 불일치 ⚠️)'}
             </p>
           )}
         </Card>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StepHeading, Textarea } from '../components/ui'
+import { Card, ChainLink, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StepHeading, Textarea, TechDetails } from '../components/ui'
 import { BACKEND_URL } from '../config'
 
 type Admin = { name: string; address: string }
@@ -175,8 +175,9 @@ export default function SiteRecord() {
       {error && <ErrorText>{error}</ErrorText>}
       {result && (
         <Card>
-          <p className="text-xs font-mono break-all text-ink-muted">tx: {result.txHash}</p>
-          <p className="text-xs font-mono break-all text-ink-muted">recordHash: {result.recordHash}</p>
+          <p className="text-sm text-hazard-green font-semibold">✅ 위험성평가가 블록체인에 기록됐어요. 원문을 고치면 검증에서 바로 드러나요.</p>
+          <ChainLink txHash={result.txHash} />
+          <TechDetails rows={[['원문 해시', result.recordHash], ['검증 코드', result.nonce]]} />
         </Card>
       )}
 
@@ -198,6 +199,7 @@ export default function SiteRecord() {
               <p className="text-xs text-ink-muted">작성자: {r.adminName}</p>
               <p className="text-ink text-sm">{r.processSummary}</p>
               {r.changeReason && <p className="text-ink-muted text-xs">변경 사유: {r.changeReason}</p>}
+              <ChainLink txHash={r.txHash} />
             </Card>
           ))}
         </div>

@@ -1,4 +1,5 @@
 import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
+import { EXPLORER_URL } from '../config'
 
 export function PageTitle({ title, subtitle }: { title: string; subtitle: string }) {
   return (
@@ -92,5 +93,37 @@ export function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
         {ok ? '통과' : '실패'}
       </span>
     </div>
+  )
+}
+
+// tx 해시 같은 건 기본 화면에서 숨기고 링크/접기로만 보여준다
+export function ChainLink({ txHash, label = '블록체인 기록 보기' }: { txHash: string; label?: string }) {
+  if (EXPLORER_URL) {
+    return (
+      <a
+        href={`${EXPLORER_URL}/tx/${txHash}`}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-block text-xs font-semibold text-ink-muted underline underline-offset-2 hover:text-charcoal"
+      >
+        {label} ↗
+      </a>
+    )
+  }
+  return <TechDetails label={label} rows={[['tx', txHash]]} />
+}
+
+export function TechDetails({ label = '기술 정보', rows }: { label?: string; rows: [string, string][] }) {
+  return (
+    <details className="text-xs text-ink-muted">
+      <summary className="cursor-pointer font-semibold select-none">{label}</summary>
+      <div className="mt-1.5 space-y-1">
+        {rows.map(([k, v]) => (
+          <p key={k} className="font-mono break-all">
+            {k}: {v}
+          </p>
+        ))}
+      </div>
+    </details>
   )
 }

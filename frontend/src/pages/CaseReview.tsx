@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StatusBadge, StepHeading } from '../components/ui'
+import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StatusBadge, StepHeading, TechDetails } from '../components/ui'
 import { BACKEND_URL } from '../config'
 
 type Admin = { name: string; address: string }
@@ -168,7 +168,7 @@ export default function CaseReview() {
       {bundle && (
         <Card>
           <StepHeading step={2}>이 케이스에 걸린 기록</StepHeading>
-          <p className="text-xs font-mono break-all text-ink-muted">caseId: {bundle.caseId}</p>
+          <TechDetails rows={[['caseId', bundle.caseId], ['제출 범위 해시', bundle.state.scopeHash]]} />
 
           <div>
             <p className="font-display font-bold uppercase text-sm text-charcoal mb-2">
@@ -197,7 +197,7 @@ export default function CaseReview() {
               return (
                 <div key={c.nonce} className="border-2 border-charcoal/20 p-2.5 mb-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-ink-muted font-mono text-xs">{c.nonce.slice(0, 10)}...</span>
+                    <span className="text-ink-muted text-xs">{new Date(c.timestamp * 1000).toLocaleTimeString()} 출입 검사</span>
                     <span className={allPassed ? 'text-hazard-green font-semibold' : 'text-hazard-red font-semibold'}>
                       {allPassed ? '통과' : c.overridden ? '불합격 → 수동 승인' : '불합격'}
                     </span>
@@ -210,8 +210,8 @@ export default function CaseReview() {
 
           {check && bundle.state.round > 0 && (
             <div className="space-y-2 pt-2">
-              <StatusBadge ok={check.scopeIntact} label="제출 범위 원문 = 온체인 scopeHash" />
-              <StatusBadge ok={check.recordsPresent} label="제출 범위의 기록이 전부 온체인에 존재" />
+              <StatusBadge ok={check.scopeIntact} label="제출한 기록 목록이 블록체인 값과 일치" />
+              <StatusBadge ok={check.recordsPresent} label="제출한 기록이 전부 블록체인에 있음" />
               {check.addedAfterSubmit > 0 && (
                 <p className="text-xs text-ink-muted">제출 이후 추가된 기록 {check.addedAfterSubmit}건 (이번 승인 범위 밖)</p>
               )}

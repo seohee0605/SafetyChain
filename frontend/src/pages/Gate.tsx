@@ -1,7 +1,7 @@
 import jsQR from 'jsqr'
 import QRCode from 'qrcode'
 import { useEffect, useRef, useState } from 'react'
-import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StepHeading, SuccessButton } from '../components/ui'
+import { Card, ChainLink, ErrorText, Input, PageTitle, SecondaryButton, Select, StepHeading, SuccessButton } from '../components/ui'
 import { BACKEND_URL } from '../config'
 
 type QrIssue = { nonce: string; expiresAt: number }
@@ -17,23 +17,30 @@ type GateResult = {
 type Reason = { code: number; label: string }
 type Admin = { name: string; address: string }
 type OverrideResult = { txHash: string; reason: string }
+type Stage = 'inspecting' | 'signing' | 'anchoring' | 'confirmed'
 
-// 이 페이지는 "인부 화면"(QR 발급)과 "게이트 화면"(QR 스캔 + 촬영)을 한 브라우저에서
-// 시뮬레이션한다. 실제 배포에서는 QR은 인부 개인 폰에, 스캔/촬영은 게이트 기기에서 각각
-// 일어난다. 스캔으로 읽은 nonce만 제출에 쓰기 때문에, 발급된 nonce와 실제 스캔된 값이
-// 다르면(예: 화면 캡처를 잘못 보여줬을 때) 그대로 드러난다 — 이게 이 데모의 핵심 증명 포인트.
+const STAGES: { key: Stage; label: string }[] = [
+  { key: 'inspecting', label: '검사 중' },
+  { key: 'signing', label: '기기 서명' },
+  { key: 'anchoring', label: '블록체인 기록 중' },
+  { key: 'confirmed', label: '확정' },
+]
+
+// 한 브라우저에서 "인부 화면"(QR 발급)과 "게이트 화면"(스캔·촬영)을 같이 시뮬레이션한다.
+// 실제로는 QR은 근로자 폰(#/worker)에, 스캔·촬영은 게이트 태블릿에서 일어난다.
 const today = () => new Date().toISOString().slice(0, 10)
 
-// 데모 영상 촬영용 임시 모드. 실제 웹캠 대신 준비된 이미지를 사용해서
-// QR 스캔·촬영 장면을 깔끔하게 찍을 수 있게 한다. 판정은 그 이미지로 실제
-// 백엔드 YOLO 호출을 그대로 타므로 결과는 진짜다. 촬영 끝나면 false로 되돌릴 것.
-const DEMO_MODE = true
+// 데모 영상 촬영용: 주소 끝에 ?demo 를 붙이면 웹캠 대신 준비된 사진을 쓴다 (판정은 실제 백엔드)
+const DEMO_MODE = new URLSearchParams(window.location.search).has('demo')
 const DEMO_CAPTURE_IMAGE = '/demo-helmet.jpg'
 
 export default function Gate() {
   const [workerId, setWorkerId] = useState('')
   const [siteId, setSiteId] = useState('')
   const [workDate, setWorkDate] = useState(today())
+  const [needsConsent, setNeedsConsent] = useState(false)
+  const [consentPersonal, setConsentPersonal] = useState(false)
+  const [consentSensitive, setConsentSensitive] = useState(false)
   const [qr, setQr] = useState<QrIssue | null>(null)
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
@@ -41,13 +48,14 @@ export default function Gate() {
   const [alcoholPass, setAlcoholPass] = useState(true)
   const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [stage, setStage] = useState<Stage | null>(null)
   const [result, setResult] = useState<GateResult | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [reasons, setReasons] = useState<Reason[]>([])
   const [supervisors, setSupervisors] = useState<Admin[]>([])
   const [reasonCode, setReasonCode] = useState(1)
   const [supervisorName, setSupervisorName] = useState('')
+  const [showOverride, setShowOverride] = useState(false)
   const [overrideResult, setOverrideResult] = useState<OverrideResult | null>(null)
   const [overriding, setOverriding] = useState(false)
 
@@ -78,23 +86,52 @@ export default function Gate() {
     }
   }, [])
 
-  async function issueQr() {
-    setError(null)
+  function resetForNext() {
+    setQr(null)
+    setQrImageUrl(null)
+    setScannedNonce(null)
+    setCapturedBlob(null)
+    setPreviewUrl(null)
+    setStage(null)
     setResult(null)
     setOverrideResult(null)
-    setScannedNonce(null)
+    setShowOverride(false)
+    setAlcoholPass(true)
+    setError(null)
+  }
+
+  async function issueQr() {
+    resetForNext()
     const res = await fetch(`${BACKEND_URL}/qr/issue`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workerId, siteId }),
     })
+    if (res.status === 403) {
+      setNeedsConsent(true)
+      return
+    }
     if (!res.ok) {
       setError('QR 발급 실패')
       return
     }
     const data: QrIssue = await res.json()
+    setNeedsConsent(false)
     setQr(data)
     setQrImageUrl(await QRCode.toDataURL(data.nonce, { margin: 1, width: 220 }))
+  }
+
+  async function giveConsent() {
+    const res = await fetch(`${BACKEND_URL}/consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workerId, siteId, personal: consentPersonal, sensitive: consentSensitive }),
+    })
+    if (!res.ok) {
+      setError('동의 저장 실패')
+      return
+    }
+    await issueQr()
   }
 
   async function startCamera() {
@@ -114,7 +151,6 @@ export default function Gate() {
     setScanning(true)
 
     if (DEMO_MODE) {
-      // 실제 스캔 대신 발급된 진짜 nonce를 그대로 사용 — 판정·제출은 이후 전부 실제 흐름.
       setTimeout(() => {
         if (qr) setScannedNonce(qr.nonce)
         setScanning(false)
@@ -168,10 +204,12 @@ export default function Gate() {
     }, 'image/jpeg')
   }
 
+  // 백엔드가 단계(검사 → 서명 → 온체인 기록 → 확정)를 끝낼 때마다 한 줄씩 보내준다
   async function submitCheck() {
     if (!scannedNonce || !capturedBlob) return
-    setLoading(true)
     setError(null)
+    setResult(null)
+    setStage('inspecting')
     try {
       const form = new FormData()
       form.append('image', capturedBlob, 'capture.jpg')
@@ -181,21 +219,35 @@ export default function Gate() {
       form.append('siteId', siteId)
       form.append('workDate', workDate)
 
-      const res = await fetch(`${BACKEND_URL}/gate/check`, { method: 'POST', body: form })
-      if (!res.ok) {
+      const res = await fetch(`${BACKEND_URL}/gate/check/stream`, { method: 'POST', body: form })
+      if (!res.ok || !res.body) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.detail ?? '제출 실패')
       }
-      setResult(await res.json())
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const msg = JSON.parse(line)
+          if (msg.stage === 'error') throw new Error(msg.detail)
+          setStage(msg.stage)
+          if (msg.stage === 'confirmed') setResult(msg.result)
+        }
+      }
     } catch (e) {
+      setStage(null)
       setError(e instanceof Error ? e.message : '알 수 없는 오류')
-    } finally {
-      setLoading(false)
     }
   }
 
-  // AI 보호구 불합격을 감독자가 사유 코드와 함께 수동 처리 (Manual Override).
-  // 원래 AI 판정은 온체인에 그대로 남고, override 기록이 추가로 남는다.
+  // AI 보호구 불합격을 감독자가 사유 코드와 함께 수동 처리. 원래 판정은 그대로 남고 override 기록이 추가된다
   async function submitOverride() {
     if (!result) return
     setOverriding(true)
@@ -211,6 +263,7 @@ export default function Gate() {
         throw new Error(body.detail ?? '수동 처리 실패')
       }
       setOverrideResult(await res.json())
+      setShowOverride(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : '알 수 없는 오류')
     } finally {
@@ -220,10 +273,14 @@ export default function Gate() {
 
   return (
     <div className="space-y-5">
-      <PageTitle title="게이트 시뮬레이터" subtitle="QR 발급(인부 화면) → 스캔(게이트 화면) → 촬영 → 온체인 제출" />
+      <PageTitle title="게이트 키오스크" subtitle="QR 스캔 → 촬영 → 기기 서명 → 블록체인 확정 후 출입 판정" />
 
       <Card>
-        <StepHeading step={1}>인부 화면: QR 발급</StepHeading>
+        <StepHeading step={1}>근로자 QR 발급</StepHeading>
+        <p className="text-xs text-ink-muted">
+          실제로는 근로자가 폰에서 <a href="#/worker" className="underline font-semibold">근로자 앱</a>을 열어 QR을 띄웁니다.
+          여기서는 같은 화면에서 시뮬레이션합니다.
+        </p>
         <div className="space-y-2.5">
           <Input placeholder="사번" value={workerId} onChange={(e) => setWorkerId(e.target.value)} />
           <Input placeholder="현장 ID" value={siteId} onChange={(e) => setSiteId(e.target.value)} />
@@ -231,11 +288,29 @@ export default function Gate() {
           <SecondaryButton disabled={!workerId || !siteId} onClick={issueQr}>
             QR 발급
           </SecondaryButton>
+
+          {needsConsent && (
+            <div className="border-2 border-charcoal bg-safety-yellow/20 p-3 space-y-2 text-sm">
+              <p className="font-semibold">이 근로자는 아직 정보 수집 동의를 하지 않았어요.</p>
+              <label className="flex gap-2 items-start">
+                <input type="checkbox" checked={consentPersonal} onChange={(e) => setConsentPersonal(e.target.checked)} className="mt-1 w-4 h-4 accent-safety-yellow" />
+                <span>[필수] 개인정보(사번) 수집·이용 동의</span>
+              </label>
+              <label className="flex gap-2 items-start">
+                <input type="checkbox" checked={consentSensitive} onChange={(e) => setConsentSensitive(e.target.checked)} className="mt-1 w-4 h-4 accent-safety-yellow" />
+                <span>[필수·별도] 민감정보(검사 사진, 음주 측정 통과 여부) 수집·이용 동의</span>
+              </label>
+              <SecondaryButton disabled={!consentPersonal || !consentSensitive} onClick={giveConsent}>
+                동의 후 QR 발급
+              </SecondaryButton>
+            </div>
+          )}
+
           {qrImageUrl && (
             <div className="flex items-center gap-4 bg-paper-dark border-2 border-charcoal p-3">
               <img src={qrImageUrl} alt="발급된 QR" className="w-28 h-28 border-2 border-charcoal" />
               <p className="text-xs text-ink-muted">
-                실제 배포 시 이 QR은 인부 개인 폰에 표시됩니다.
+                1회용 출입 QR
                 <br />
                 만료: {qr && new Date(qr.expiresAt * 1000).toLocaleTimeString()}
               </p>
@@ -245,7 +320,7 @@ export default function Gate() {
       </Card>
 
       <Card>
-        <StepHeading step={2}>게이트 화면: QR 스캔 + 촬영</StepHeading>
+        <StepHeading step={2}>QR 스캔 + 촬영</StepHeading>
         {DEMO_MODE ? (
           <div className="w-full bg-charcoal border-2 border-charcoal aspect-video flex items-center justify-center">
             {qrImageUrl && (
@@ -267,8 +342,8 @@ export default function Gate() {
           </SecondaryButton>
         </div>
         {scannedNonce && (
-          <p className="text-xs font-mono break-all bg-hazard-green/10 border-2 border-hazard-green text-hazard-green font-semibold p-3">
-            ✅ 스캔된 nonce: {scannedNonce}
+          <p className="text-sm bg-hazard-green/10 border-2 border-hazard-green text-hazard-green font-semibold p-3">
+            ✅ 출입 QR 확인됨 (1회용)
           </p>
         )}
         {previewUrl && <img src={previewUrl} alt="촬영 미리보기" className="w-32 border-2 border-charcoal" />}
@@ -287,61 +362,150 @@ export default function Gate() {
         </label>
       </Card>
 
-      <SuccessButton disabled={!scannedNonce || !capturedBlob || loading} onClick={submitCheck} className="w-full">
-        {loading ? '제출 중...' : '게이트 통과 제출'}
+      <SuccessButton disabled={!scannedNonce || !capturedBlob || stage !== null} onClick={submitCheck} className="w-full text-lg py-4">
+        게이트 통과 제출
       </SuccessButton>
 
       {error && <ErrorText>{error}</ErrorText>}
-      {result && (
-        <Card>
-          <p className="font-display font-bold uppercase text-charcoal text-lg">
-            {result.verdict ? '✅ 출입 허용' : overrideResult ? '🟡 감독자 수동 승인 · 출입 허용' : '❌ 출입 차단'}
-          </p>
-          <p className="text-sm text-ink">
-            안전모 {result.helmetPass ? '✓' : '✗'} · 안전화 {result.shoesPass ? '✓' : '✗'} · 음주{' '}
-            {result.alcoholPass ? '✓' : '✗'}
-          </p>
-          <p className="text-xs font-mono break-all text-ink-muted">tx: {result.txHash}</p>
-          {!result.verdict && !result.alcoholPass && (
-            <p className="text-xs text-hazard-red font-semibold">음주 불합격은 AI 판정이 아니라 수동 처리할 수 없습니다.</p>
-          )}
-        </Card>
-      )}
 
-      {result && result.overridable && !overrideResult && (
-        <Card>
-          <StepHeading step={4}>감독자 수동 처리 (AI 오판 대응)</StepHeading>
-          <p className="text-xs text-ink-muted">
-            AI 판정 결과는 그대로 기록에 남고, 수동 처리 사유와 감독자 서명이 추가로 온체인에 기록됩니다. 수동 처리
-            건수는 현장 대시보드와 감리·발주처 검토 대상에 포함됩니다.
-          </p>
-          <Select value={reasonCode} onChange={(e) => setReasonCode(Number(e.target.value))}>
-            {reasons.map((r) => (
-              <option key={r.code} value={r.code}>
-                {r.label}
-              </option>
-            ))}
-          </Select>
-          <Select value={supervisorName} onChange={(e) => setSupervisorName(e.target.value)}>
-            {supervisors.length === 0 && <option value="">등록된 감독자 없음</option>}
-            {supervisors.map((a) => (
-              <option key={a.name} value={a.name}>
-                {a.name}
-              </option>
-            ))}
-          </Select>
-          <PrimaryButton onClick={submitOverride} disabled={!supervisorName || overriding} className="w-full">
-            {overriding ? '서명 중...' : '사유를 남기고 수동 승인'}
-          </PrimaryButton>
-        </Card>
+      {stage && (
+        <ResultScreen
+          stage={stage}
+          result={result}
+          overrideResult={overrideResult}
+          showOverride={showOverride}
+          onShowOverride={() => setShowOverride(true)}
+          onNext={resetForNext}
+          error={error}
+          overridePanel={
+            <div className="bg-white text-ink border-2 border-charcoal p-4 space-y-2.5 text-left">
+              <p className="font-display font-bold uppercase text-charcoal">감독자 확인 (AI 오판 대응)</p>
+              <p className="text-xs text-ink-muted">
+                AI 판정은 그대로 남고, 사유 코드와 감독자 서명이 추가로 블록체인에 기록됩니다. 현장 통계와 감리·발주처 검토에도 집계됩니다.
+              </p>
+              <Select value={reasonCode} onChange={(e) => setReasonCode(Number(e.target.value))}>
+                {reasons.map((r) => (
+                  <option key={r.code} value={r.code}>
+                    {r.label}
+                  </option>
+                ))}
+              </Select>
+              <Select value={supervisorName} onChange={(e) => setSupervisorName(e.target.value)}>
+                {supervisors.length === 0 && <option value="">등록된 감독자 없음</option>}
+                {supervisors.map((a) => (
+                  <option key={a.name} value={a.name}>
+                    {a.name}
+                  </option>
+                ))}
+              </Select>
+              <button
+                onClick={submitOverride}
+                disabled={!supervisorName || overriding}
+                className="w-full bg-safety-yellow border-2 border-charcoal py-3 font-display font-bold uppercase text-charcoal disabled:opacity-40"
+              >
+                {overriding ? '서명 중...' : '사유를 남기고 출입 허용'}
+              </button>
+            </div>
+          }
+        />
       )}
+    </div>
+  )
+}
 
-      {overrideResult && (
-        <Card>
-          <p className="text-sm text-ink">수동 처리 사유: {overrideResult.reason}</p>
-          <p className="text-xs font-mono break-all text-ink-muted">tx: {overrideResult.txHash}</p>
-        </Card>
-      )}
+function ResultScreen(props: {
+  stage: Stage
+  result: GateResult | null
+  overrideResult: OverrideResult | null
+  showOverride: boolean
+  onShowOverride: () => void
+  onNext: () => void
+  error: string | null
+  overridePanel: React.ReactNode
+}) {
+  const { stage, result, overrideResult, showOverride, onShowOverride, onNext, error, overridePanel } = props
+  const done = stage === 'confirmed' && result
+  const stageIndex = STAGES.findIndex((s) => s.key === stage)
+
+  let tone = 'bg-charcoal text-white'
+  let icon = ''
+  let title = '처리 중'
+  let message = ''
+  if (done && result.verdict) {
+    tone = 'bg-hazard-green text-white'
+    icon = '✓'
+    title = '출입 허용'
+    message = '안전 검사를 모두 통과했습니다'
+  } else if (done && overrideResult) {
+    tone = 'bg-safety-yellow text-charcoal'
+    icon = '!'
+    title = '감독자 확인 후 출입 허용'
+    message = `사유: ${overrideResult.reason}`
+  } else if (done) {
+    tone = 'bg-hazard-red text-white'
+    icon = '✕'
+    title = '출입 불가'
+    message = !result.alcoholPass
+      ? '음주 측정 불합격입니다. 감독자 확인으로도 출입할 수 없습니다'
+      : '보호구 착용을 확인해 주세요'
+  }
+
+  return (
+    <div className={`fixed inset-0 z-50 flex flex-col items-center justify-center p-6 transition-colors duration-300 ${tone}`}>
+      <div className="w-full max-w-xl text-center space-y-6">
+        {!done && (
+          <>
+            <div className="mx-auto w-16 h-16 border-4 border-white/30 border-t-safety-yellow rounded-full animate-spin" />
+            <ol className="space-y-2 text-left max-w-xs mx-auto">
+              {STAGES.map((s, i) => (
+                <li key={s.key} className={`flex items-center gap-3 text-lg ${i <= stageIndex ? 'text-white' : 'text-white/35'}`}>
+                  <span className="w-6 text-center">{i < stageIndex ? '✓' : i === stageIndex ? '●' : '○'}</span>
+                  <span className="font-display font-bold uppercase tracking-wide">{s.label}</span>
+                </li>
+              ))}
+            </ol>
+            {error && <p className="text-safety-yellow font-semibold">{error}</p>}
+          </>
+        )}
+
+        {done && (
+          <>
+            <div className="text-8xl font-display font-extrabold leading-none">{icon}</div>
+            <p className="text-5xl font-display font-extrabold uppercase tracking-wide">{title}</p>
+            <p className="text-lg opacity-90">{message}</p>
+            <div className="flex justify-center gap-2 text-sm font-semibold">
+              {[
+                ['안전모', result.helmetPass],
+                ['안전화', result.shoesPass],
+                ['음주', result.alcoholPass],
+              ].map(([label, ok]) => (
+                <span key={label as string} className="px-3 py-1.5 border-2 border-current">
+                  {label} {ok ? '통과' : '불합격'}
+                </span>
+              ))}
+            </div>
+
+            {result.overridable && !overrideResult && !showOverride && (
+              <button onClick={onShowOverride} className="underline underline-offset-4 font-semibold">
+                AI 판정이 틀렸나요? 감독자 확인
+              </button>
+            )}
+            {result.overridable && !overrideResult && showOverride && overridePanel}
+
+            <div className="space-y-3">
+              <button
+                onClick={onNext}
+                className="w-full bg-white text-charcoal border-2 border-charcoal py-4 text-xl font-display font-bold uppercase tracking-wide"
+              >
+                다음 작업자
+              </button>
+              <div className="opacity-80 [&_a]:text-current [&_summary]:text-current">
+                <ChainLink txHash={overrideResult?.txHash ?? result.txHash} />
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   )
 }

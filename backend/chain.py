@@ -400,3 +400,16 @@ def get_case_history(case_id: bytes) -> list[dict]:
         }
         for action, reason, scope, actor, _role, nonce, anchored_at in entries
     ]
+
+
+def list_site_checkins(site_id_plain: str, limit: int = 500) -> list[dict]:
+    # 대시보드 일별 집계용. 최근 limit건만 온체인에서 읽는다
+    total = get_site_stats(site_id_plain)["checkIns"]
+    if total == 0:
+        return []
+    rows = contract.functions.getCheckIns(site_id_hash(site_id_plain), max(0, total - limit), total).call()
+    fields = [f["name"] for f in CHECKIN_TYPES["CheckIn"]]
+    return [
+        {"data": dict(zip(fields, data)), "anchoredAt": anchored_at, "overridden": overridden}
+        for data, _device, anchored_at, overridden, _reason, _by, _at in rows
+    ]

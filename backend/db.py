@@ -26,6 +26,22 @@ CREATE TABLE IF NOT EXISTS workers (
     name TEXT NOT NULL
 );
 
+-- 민감정보(검사 사진·음주 통과 여부) 수집 동의. 동의 없으면 QR 발급 안 함
+CREATE TABLE IF NOT EXISTS consents (
+    worker_id TEXT NOT NULL,
+    site_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    agreed_at INTEGER NOT NULL,
+    PRIMARY KEY (worker_id, site_id)
+);
+
+-- 현장 사고 보고일 (무사고 일수 계산용, 오프체인)
+CREATE TABLE IF NOT EXISTS incidents (
+    site_id TEXT NOT NULL,
+    incident_date TEXT NOT NULL,
+    reported_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS nonces (
     nonce TEXT PRIMARY KEY,
     worker_id TEXT NOT NULL,
@@ -338,3 +354,59 @@ def count_unchecked(site_id: str) -> int:
             "SELECT COUNT(*) AS c FROM nonces WHERE site_id = ? AND consumed = 0 AND expires_at < ?",
             (site_id, int(time.time())),
         ).fetchone()["c"]
+
+
+def save_consent(worker_id: str, site_id: str, version: str) -> int:
+    now = int(time.time())
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO consents (worker_id, site_id, version, agreed_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(worker_id, site_id) DO UPDATE SET version = excluded.version, agreed_at = excluded.agreed_at",
+            (worker_id, site_id, version, now),
+        )
+    return now
+
+
+def get_consent(worker_id: str, site_id: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM consents WHERE worker_id = ? AND site_id = ?", (worker_id, site_id)
+        ).fetchone()
+
+
+def delete_consent(worker_id: str, site_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM consents WHERE worker_id = ? AND site_id = ?", (worker_id, site_id))
+
+
+def list_checkins_by_worker(worker_id_hash: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM checkins WHERE worker_id_hash = ? ORDER BY timestamp DESC LIMIT 50", (worker_id_hash,)
+        ).fetchall()
+
+
+def unchecked_expiry_times(site_id: str, since: int) -> list[int]:
+    # 일별 미검사 집계용: 쓰이지 않고 만료된 QR의 만료 시각
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT expires_at FROM nonces WHERE site_id = ? AND consumed = 0 AND expires_at < ? AND expires_at >= ?",
+            (site_id, int(time.time()), since),
+        ).fetchall()
+    return [r["expires_at"] for r in rows]
+
+
+def add_incident(site_id: str, incident_date: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO incidents (site_id, incident_date, reported_at) VALUES (?, ?, ?)",
+            (site_id, incident_date, int(time.time())),
+        )
+
+
+def last_incident_date(site_id: str) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(incident_date) AS d FROM incidents WHERE site_id = ?", (site_id,)
+        ).fetchone()
+    return row["d"] if row else None

@@ -1,11 +1,13 @@
 import json
 import secrets
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from web3.exceptions import ContractCustomError, ContractLogicError
 
@@ -82,7 +84,149 @@ class QrIssueRequest(BaseModel):
 
 @app.post("/qr/issue")
 def issue_qr(req: QrIssueRequest):
+    # 민감정보 동의 없이는 자동 게이트를 쓸 수 없다 (관리자 대면 확인으로 처리)
+    if db.get_consent(req.workerId, req.siteId) is None:
+        raise HTTPException(403, "consent required")
     return db.issue_nonce(req.workerId, req.siteId)
+
+
+# ======================================================================
+# 근로자 앱: 민감정보 동의, 내 출입 기록
+# ======================================================================
+
+CONSENT_VERSION = "2026-10"
+
+
+class ConsentRequest(BaseModel):
+    workerId: str
+    siteId: str
+    personal: bool  # 일반 개인정보 (사번)
+    sensitive: bool  # 민감정보 (검사 사진, 음주 측정 통과 여부) - 별도 동의
+
+
+@app.post("/consent")
+def give_consent(req: ConsentRequest):
+    if not (req.personal and req.sensitive):
+        raise HTTPException(400, "both consents are required to use the automated gate")
+    agreed_at = db.save_consent(req.workerId, req.siteId, CONSENT_VERSION)
+    return {"agreed": True, "version": CONSENT_VERSION, "agreedAt": agreed_at}
+
+
+@app.get("/consent/{site}/{worker}")
+def get_consent(site: str, worker: str):
+    row = db.get_consent(worker, site)
+    if row is None:
+        return {"agreed": False, "version": CONSENT_VERSION, "agreedAt": None}
+    return {"agreed": True, "version": row["version"], "agreedAt": row["agreed_at"]}
+
+
+@app.post("/consent/withdraw")
+def withdraw_consent(req: QrIssueRequest):
+    db.delete_consent(req.workerId, req.siteId)
+    return {"agreed": False}
+
+
+@app.get("/worker/{site}/{worker}/records")
+def worker_records(site: str, worker: str):
+    worker_hash = chain.to_hex0x(chain.worker_id_hash(worker, db.get_or_create_site_salt(site)))
+    out = []
+    for c in db.list_checkins_by_worker(worker_hash):
+        passed = bool(c["helmet_pass"] and c["shoes_pass"] and c["alcohol_pass"])
+        overridden = db.get_override_for_checkin(c["nonce"]) is not None
+        out.append({
+            "nonce": c["nonce"],
+            "at": c["timestamp"],
+            "result": "pass" if passed else ("override" if overridden else "fail"),
+            "helmetPass": bool(c["helmet_pass"]),
+            "shoesPass": bool(c["shoes_pass"]),
+            "alcoholPass": bool(c["alcohol_pass"]),
+            "txHash": c["tx_hash"],
+        })
+    return out
+
+
+class GateError(Exception):
+    pass
+
+
+def _check_gate_request(nonce: str, workerId: str, siteId: str) -> bytes:
+    nonce_row = db.get_nonce(nonce)
+    if nonce_row is None:
+        raise HTTPException(404, "nonce not found")
+    if nonce_row["consumed"]:
+        raise HTTPException(400, "nonce already used")
+    if nonce_row["expires_at"] < int(time.time()):
+        raise HTTPException(400, "nonce expired")
+    # 다른 사람 QR로 체크인 못하게
+    if nonce_row["worker_id"] != workerId or nonce_row["site_id"] != siteId:
+        raise HTTPException(400, "QR was issued for a different worker/site")
+    return _parse_nonce(nonce)
+
+
+def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worker_id, site_id, work_date):
+    """검사 -> 기기 서명 -> 온체인 기록 -> 확정. 단계가 끝날 때마다 상태를 내보낸다.
+    판정 결과는 온체인 확정 뒤에만 나간다 (Gatekeeper)."""
+    yield {"stage": "inspecting"}
+    image_path = UPLOAD_DIR / f"{nonce_bytes.hex()}_{Path(image_name or 'capture.jpg').name}"
+    image_path.write_bytes(image_bytes)
+    evidence_bytes = chain.evidence_hash(image_bytes)
+    ppe = vision.check_ppe(str(image_path))
+
+    yield {"stage": "signing"}
+    site_salt = db.get_or_create_site_salt(site_id)
+    case_id_bytes = chain.case_id_hash(site_id, work_date)
+    worker_id_bytes = chain.worker_id_hash(worker_id, site_salt)
+    model_hash_bytes = vision.get_model_hash()
+    signed = chain.build_and_sign_checkin(
+        case_id=case_id_bytes,
+        worker_id=worker_id_bytes,
+        site_id=chain.site_id_hash(site_id),
+        helmet_pass=ppe["helmetPass"],
+        shoes_pass=ppe["shoesPass"],
+        alcohol_pass=alcohol_pass,
+        model_hash=model_hash_bytes,
+        evidence=evidence_bytes,
+        nonce=nonce_bytes,
+    )
+
+    yield {"stage": "anchoring"}
+    try:
+        tx_hash = chain.submit_checkin(signed["checkin"], signed["signature"])
+    except ONCHAIN_ERRORS as e:
+        raise GateError(f"on-chain submission rejected: {chain.describe_error(e)}") from e
+
+    db.consume_nonce(nonce)
+    db.record_checkin(
+        nonce=nonce,
+        case_id=chain.to_hex0x(case_id_bytes),
+        site_id=site_id,
+        worker_id_hash=chain.to_hex0x(worker_id_bytes),
+        tx_hash=tx_hash,
+        helmet_pass=ppe["helmetPass"],
+        shoes_pass=ppe["shoesPass"],
+        alcohol_pass=alcohol_pass,
+        model_hash=chain.to_hex0x(model_hash_bytes),
+        device_address=chain.DEVICE_ADDRESS,
+        signature=chain.to_hex0x(signed["signature"]),
+        timestamp=signed["checkin"]["timestamp"],
+        evidence_hash=chain.to_hex0x(evidence_bytes),
+        image_path=str(image_path),
+    )
+
+    verdict = ppe["helmetPass"] and ppe["shoesPass"] and alcohol_pass
+    yield {
+        "stage": "confirmed",
+        "result": {
+            "txHash": tx_hash,
+            "verdict": verdict,
+            "nonce": nonce,
+            "helmetPass": ppe["helmetPass"],
+            "shoesPass": ppe["shoesPass"],
+            "alcoholPass": alcohol_pass,
+            # 음주 불합격은 AI 판정이 아니라서 수동 처리 대상이 아니다
+            "overridable": (not verdict) and alcohol_pass,
+        },
+    }
 
 
 @app.post("/gate/check")
@@ -94,79 +238,42 @@ def gate_check(
     siteId: str = Form(...),
     workDate: str = Form(None),
 ):
-    nonce_row = db.get_nonce(nonce)
-    if nonce_row is None:
-        raise HTTPException(404, "nonce not found")
-    if nonce_row["consumed"]:
-        raise HTTPException(400, "nonce already used")
-    if nonce_row["expires_at"] < int(time.time()):
-        raise HTTPException(400, "nonce expired")
-    # 다른 사람 QR로 체크인 못하게
-    if nonce_row["worker_id"] != workerId or nonce_row["site_id"] != siteId:
-        raise HTTPException(400, "QR was issued for a different worker/site")
-    nonce_bytes = _parse_nonce(nonce)
-
-    work_date = workDate or _default_work_date()
-
-    image_bytes = image.file.read()
-    image_path = UPLOAD_DIR / f"{nonce.removeprefix('0x')}_{Path(image.filename or 'capture.jpg').name}"
-    image_path.write_bytes(image_bytes)
-    evidence_bytes = chain.evidence_hash(image_bytes)
-
-    ppe = vision.check_ppe(str(image_path))
-
-    site_salt = db.get_or_create_site_salt(siteId)
-    case_id_bytes = chain.case_id_hash(siteId, work_date)
-    worker_id_bytes = chain.worker_id_hash(workerId, site_salt)
-    model_hash_bytes = vision.get_model_hash()
-
-    signed = chain.build_and_sign_checkin(
-        case_id=case_id_bytes,
-        worker_id=worker_id_bytes,
-        site_id=chain.site_id_hash(siteId),
-        helmet_pass=ppe["helmetPass"],
-        shoes_pass=ppe["shoesPass"],
-        alcohol_pass=alcoholPass,
-        model_hash=model_hash_bytes,
-        evidence=evidence_bytes,
-        nonce=nonce_bytes,
-    )
-
-    # Gatekeeper: 온체인에 기록이 확정된 뒤에만 판정 결과를 돌려준다.
+    nonce_bytes = _check_gate_request(nonce, workerId, siteId)
+    steps = _gate_steps(nonce, nonce_bytes, image.file.read(), image.filename, alcoholPass, workerId, siteId,
+                        workDate or _default_work_date())
     try:
-        tx_hash = chain.submit_checkin(signed["checkin"], signed["signature"])
-    except ONCHAIN_ERRORS as e:
-        raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
+        for step in steps:
+            if step["stage"] == "confirmed":
+                return step["result"]
+    except GateError as e:
+        raise HTTPException(400, str(e))
 
-    db.consume_nonce(nonce)
-    db.record_checkin(
-        nonce=nonce,
-        case_id=chain.to_hex0x(case_id_bytes),
-        site_id=siteId,
-        worker_id_hash=chain.to_hex0x(worker_id_bytes),
-        tx_hash=tx_hash,
-        helmet_pass=ppe["helmetPass"],
-        shoes_pass=ppe["shoesPass"],
-        alcohol_pass=alcoholPass,
-        model_hash=chain.to_hex0x(model_hash_bytes),
-        device_address=chain.DEVICE_ADDRESS,
-        signature=chain.to_hex0x(signed["signature"]),
-        timestamp=signed["checkin"]["timestamp"],
-        evidence_hash=chain.to_hex0x(evidence_bytes),
-        image_path=str(image_path),
-    )
 
-    verdict = ppe["helmetPass"] and ppe["shoesPass"] and alcoholPass
-    return {
-        "txHash": tx_hash,
-        "verdict": verdict,
-        "nonce": nonce,
-        "helmetPass": ppe["helmetPass"],
-        "shoesPass": ppe["shoesPass"],
-        "alcoholPass": alcoholPass,
-        # 음주 불합격은 AI 판정이 아니라서 수동 처리 대상이 아니다
-        "overridable": (not verdict) and alcoholPass,
-    }
+@app.post("/gate/check/stream")
+def gate_check_stream(
+    image: UploadFile = File(...),
+    nonce: str = Form(...),
+    alcoholPass: bool = Form(...),
+    workerId: str = Form(...),
+    siteId: str = Form(...),
+    workDate: str = Form(None),
+):
+    """/gate/check과 같은데 단계마다 한 줄씩(NDJSON) 보내서 키오스크가 진행 상황을 보여줄 수 있게 한다."""
+    nonce_bytes = _check_gate_request(nonce, workerId, siteId)
+    image_bytes = image.file.read()  # 응답 스트리밍 전에 읽어둔다
+    steps = _gate_steps(nonce, nonce_bytes, image_bytes, image.filename, alcoholPass, workerId, siteId,
+                        workDate or _default_work_date())
+
+    def lines():
+        try:
+            for step in steps:
+                yield json.dumps(step, ensure_ascii=False) + "\n"
+        except GateError as e:
+            yield json.dumps({"stage": "error", "detail": str(e)}, ensure_ascii=False) + "\n"
+        except Exception as e:  # noqa: BLE001 - 키오스크에 실패를 알려야 함
+            yield json.dumps({"stage": "error", "detail": f"server error: {e}"}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 class OverrideRequest(BaseModel):
@@ -207,6 +314,13 @@ def gate_override(req: OverrideRequest):
     return {"txHash": tx_hash, "reason": OVERRIDE_REASONS[req.reasonCode], "entryAllowed": True}
 
 
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _kst_day(ts: int) -> str:
+    return datetime.fromtimestamp(ts, KST).date().isoformat()
+
+
 @app.get("/dashboard/{site}")
 def dashboard(site: str):
     stats = chain.get_site_stats(site)  # 검사·불합격·override 수는 온체인 값
@@ -214,6 +328,41 @@ def dashboard(site: str):
     unchecked = db.count_unchecked(site)  # 만료된 QR 수는 오프체인에만 있음
     failed = stats["failed"]
     total = checked + unchecked
+
+    # 최근 7일 추이: 검사·불합격·override는 온체인 기록(블록 시각) 기준
+    today = datetime.now(KST).date()
+    days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    daily = {d: {"date": d, "checked": 0, "unchecked": 0, "failed": 0, "overrides": 0} for d in days}
+    onchain = chain.list_site_checkins(site)
+    for c in onchain:
+        d = daily.get(_kst_day(c["anchoredAt"]))
+        if d is None:
+            continue
+        data = c["data"]
+        d["checked"] += 1
+        if not (data["helmetPass"] and data["shoesPass"] and data["alcoholPass"]):
+            d["failed"] += 1
+        if c["overridden"]:
+            d["overrides"] += 1
+    week_start = int(datetime.combine(today - timedelta(days=6), datetime.min.time(), KST).timestamp())
+    for ts in db.unchecked_expiry_times(site, week_start):
+        d = daily.get(_kst_day(ts))
+        if d is not None:
+            d["unchecked"] += 1
+    for d in daily.values():
+        n = d["checked"] + d["unchecked"]
+        d["rate"] = d["checked"] / n if n else None
+
+    # 무사고 일수: 마지막 사고 보고일 기준, 사고 보고가 없으면 첫 온체인 기록일 기준
+    last_incident = db.last_incident_date(site)
+    if last_incident:
+        no_incident_days, since = (today - date.fromisoformat(last_incident)).days, "incident"
+    elif onchain:
+        first = date.fromisoformat(_kst_day(min(c["anchoredAt"] for c in onchain)))
+        no_incident_days, since = (today - first).days, "firstRecord"
+    else:
+        no_incident_days, since = None, None
+
     return {
         "checkedCount": checked,
         "uncheckedCount": unchecked,
@@ -221,7 +370,27 @@ def dashboard(site: str):
         "failedCount": failed,
         "overrideCount": stats["overrides"],
         "overrideRate": (stats["overrides"] / failed) if failed else 0.0,
+        "noIncidentDays": no_incident_days,
+        "noIncidentSince": since,
+        "lastIncidentDate": last_incident,
+        "daily": list(daily.values()),
     }
+
+
+class IncidentRequest(BaseModel):
+    siteId: str
+    date: str | None = None  # YYYY-MM-DD, 없으면 오늘
+
+
+@app.post("/site/incident")
+def report_incident(req: IncidentRequest):
+    d = req.date or datetime.now(KST).date().isoformat()
+    try:
+        date.fromisoformat(d)
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    db.add_incident(req.siteId, d)
+    return {"lastIncidentDate": db.last_incident_date(req.siteId)}
 
 
 @app.get("/verify/{nonce}")

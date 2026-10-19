@@ -37,18 +37,31 @@ SafetyChain은 안전모·안전화·음주 검사 결과, 일일 위험성평�
 
 ```
 [작업자] → QR(1회용 nonce) 발급 → [게이트 웹캠] YOLO 안전모·안전화 판정
-    → [기기] EIP-712 서명 → [SafetyGate 컨트랙트] 온체인 앵커링
-    → [대시보드 / 검증뷰] 공개
+    → [게이트 기기] EIP-712 서명 (판정 결과 + 모델 해시 + 사진 해시)
+    → [SafetyGate 컨트랙트] 온체인 앵커링 → 확정된 뒤에만 게이트 결과 표시
+    → 보호구 불합격이면 [감독자] 사유 코드와 함께 수동 처리 (음주 불합격은 불가)
 
-[안전관리자] 위험성평가 작성 → 이름 선택 서명 → 온체인 앵커링 (SiteRecord)
+[감독자] 위험성평가 작성 → 원문은 SQLite, 해시만 온체인 (SiteRecord)
 
-[감독자] 케이스(caseId) 조회 → 검토 범위 고정 → 최종 서명 (CaseReview)
+[케이스 확정] 현장·작업일 단위
+    시공사 감독자 제출 → 감리 승인 → 발주처 승인 = 확정
+    반려(사유 코드) 시 보완 후 재제출, 모든 이력이 온체인에 남음
 ```
 
-같은 현장·같은 작업일의 위험성평가(SiteRecord)와 근로자 체크인(CheckIn)은
-`caseId = keccak256(siteId || workDate)`로 묶이고, 세 기록(CheckIn·SiteRecord·CaseReview)
-전부 하나의 `usedNonces` 풀과 `registeredDevices`를 공유합니다.
+### 역할 (컨트랙트가 강제)
 
+| 역할 | 누구 | 서명할 수 있는 것 |
+|---|---|---|
+| `CONTRACTOR_ADMIN_ROLE` | 시공사 운영 관리자 (릴레이) | 서명자 등록 제안, 비상 해제 |
+| `GATE_DEVICE_ROLE` | 게이트 기기 | 체크인만 |
+| `SUPERVISOR_ROLE` | 시공사 현장 감독자 | 위험성평가, 수동 처리, 케이스 제출 |
+| `INSPECTOR_ROLE` | 감리 | 서명자 등록 승인, 케이스 1차 승인/반려 |
+| `OWNER_ROLE` | 발주처 | 서명자 등록 승인, 케이스 최종 승인/반려 |
+
+- `DEFAULT_ADMIN_ROLE`은 아무에게도 없어서 `grantRole`로 역할을 임의로 줄 수 없습니다.
+- 게이트 기기·감독자는 시공사가 제안하고 감리 또는 발주처가 승인 서명을 해야 등록됩니다.
+- 서명 시각이 블록 시각 기준 10분 전 ~ 1분 후 밖이면 거부됩니다 (`StaleTimestamp`).
+- 검증뷰는 DB 원본·사진을 DB끼리가 아니라 온체인 저장값과 대조합니다.
 
 ## 기술 스택
 
@@ -84,12 +97,16 @@ safetychain/
 
 ```bash
 cd contracts
-forge install
+forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
 anvil                                   # 별도 터미널에서 로컬 체인 실행
-forge test                              # 22개 테스트 전체 통과 확인
+forge test                              # 46개 테스트
 
-# 배포 (.env 에 DEVICE_ADDRESS, ADMIN_SIGNER_ADDRESSES 설정 후)
-forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --broadcast
+# 배포 + 게이트 기기/감독자 등록 (감리 키로 승인 서명까지 스크립트에서 처리)
+export DEVICE_ADDRESS=0x...
+export ADMIN_SIGNER_ADDRESSES=0x...,0x...
+export INSPECTOR_PRIVATE_KEY=0x...
+export OWNER_ADDRESS=0x...
+forge script script/Deploy.s.sol:DeployScript --rpc-url http://127.0.0.1:8545 --broadcast --private-key <릴레이 키>
 ```
 
 ### 2. 백엔드
@@ -97,7 +114,7 @@ forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --broadcast
 ```bash
 cd backend
 pip install -r requirements.txt
-cp .env.example .env                    # RPC_URL, CONTRACT_ADDRESS 등 채우기
+cp .env.example .env                    # CONTRACT_ADDRESS, 각 역할 키 채우기 (SENDER_PRIVATE_KEY = 배포한 릴레이 키)
 uvicorn main:app --reload
 ```
 
@@ -111,8 +128,9 @@ npm run dev                             # http://localhost:5173
 
 ## 주요 기능
 
-- **게이트 체크인**: QR(1회용 nonce) 발급 → 촬영 → YOLO 판정 → 기기 서명 → 온체인 기록
-- **일일 위험성평가 앵커링**: 공정·위험요인·조치내용은 오프체인, 해시·조치완료 여부만 온체인
-- **관리자 서명 (무로그인 신원증명)**: 이름 선택만으로 사전 등록된 키로 서명
-- **케이스 연결 + 감독자 최종 검토**: caseId로 위험성평가·검사를 묶고 감독자가 범위 고정 서명
-- **검증뷰**: 서명 검증 · nonce 소진 확인 · 모델 해시 일치 확인
+- **게이트 체크인**: QR(1회용, 발급받은 작업자만 사용 가능) → 촬영 → YOLO 판정 → 기기 서명 → 온체인 기록
+- **수동 처리(Manual Override)**: 보호구 불합격만, 감독자 서명 + 사유 코드, 1회만. 현장 통계에 집계
+- **일일 위험성평가 앵커링**: 원문은 오프체인, 해시·조치완료 여부만 온체인
+- **케이스 3단계 확정**: 시공사 제출 → 감리 → 발주처, 제출 범위(scopeHash) 그대로만 승인 가능, 반려 이력 보존
+- **대시보드**: 현장 단위 검사율·불합격·수동 처리 비율 (온체인 `getSiteStats`)
+- **검증뷰**: 서명·DB 기록·사진·모델 해시를 온체인 값과 대조

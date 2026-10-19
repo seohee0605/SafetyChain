@@ -4,16 +4,8 @@ pragma solidity ^0.8.24;
 import {Script, console} from "forge-std/Script.sol";
 import {SafetyGate} from "../src/SafetyGate.sol";
 
-/// @notice SafetyGate 배포 + 초기 서명자 등록.
-///
-/// 브로드캐스터(= 백엔드 릴레이 계정)가 시공사 운영 관리자가 된다.
-/// 서명자 등록은 "시공사 제안 → 감리 승인" 2단계라서, 데모 배포에서는 감리 키로 승인 서명까지 만든다.
-///
-/// 필요한 환경변수
-///   DEVICE_ADDRESS            게이트 기기 서명 주소
-///   ADMIN_SIGNER_ADDRESSES    시공사 감독자(안전관리자) 서명 주소들, 콤마 구분
-///   INSPECTOR_PRIVATE_KEY     감리 서명 키 (등록 승인 서명용)
-///   OWNER_ADDRESS             발주처 서명 주소
+// 배포 + 초기 서명자 등록 (시공사 제안 -> 감리 승인. 데모라서 감리 키로 승인 서명까지 여기서 함)
+// env: DEVICE_ADDRESS, ADMIN_SIGNER_ADDRESSES(콤마), INSPECTOR_PRIVATE_KEY, OWNER_ADDRESS
 contract DeployScript is Script {
     function run() external returns (SafetyGate gate) {
         address device = vm.envAddress("DEVICE_ADDRESS");

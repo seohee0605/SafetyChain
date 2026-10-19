@@ -1,15 +1,9 @@
-"""YOLO 기반 안전모/안전화 착용 판정.
+"""YOLO 안전모/안전화 판정 (사전학습 가중치 그대로, 파인튜닝 X)
 
-CLAUDE.md 4절 제약: Ultralytics YOLO 사전학습 가중치를 그대로 쓰고 파인튜닝하지 않는다.
+- 헬멧: keremberke/yolov8m-hard-hat-detection (HuggingFace, Hardhat/NO-Hardhat 2클래스)
+- 안전화: 쓸만한 공개 모델을 못 찾아서 COCO person bbox -> 발 영역 색상으로 임시 판정 (개선 필요)
 
-- 헬멧: keremberke/yolov8m-hard-hat-detection (HuggingFace, Hardhat/NO-Hardhat 2클래스로
-  이미 학습된 공개 사전학습 가중치)을 그대로 갖다 쓴다. 우리가 파인튜닝한 게 아니므로
-  "사전학습 모델 그대로" 원칙과 충돌하지 않는다.
-- 안전화: 공개된 안전화 전용 탐지 모델을 찾지 못해서, COCO 사전학습 모델로 person bbox만
-  찾고 발 영역 색상 분포로 판별하는 임시 휴리스틱을 유지한다 (한계 있음, 후속 개선 대상).
-
-third-party .pt 파일은 pickle이라 임의 코드 실행 위험이 있어, 로드 시
-`ULTRALYTICS_SAFE_LOAD=1`로 ultralytics의 안전 허용목록(safe_only) 로더를 강제한다.
+.pt는 pickle이라 ULTRALYTICS_SAFE_LOAD=1로 안전 로더 강제
 """
 import os
 from pathlib import Path

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StepHeading } from '../components/ui'
+import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StatusBadge, StepHeading } from '../components/ui'
 import { BACKEND_URL } from '../config'
 
 type Admin = { name: string; address: string }
 type Reviewer = { role: 'inspector' | 'owner'; name: string; address: string }
 type Reason = { code: number; label: string }
+type CaseVerify = { scopeIntact: boolean; recordsPresent: boolean; addedAfterSubmit: number }
 
 type CheckInRow = {
   nonce: string
@@ -53,9 +54,7 @@ const STEPS: { key: CaseStatus[]; label: string }[] = [
 
 const ACTION_LABEL = { submit: '제출', approve: '승인', reject: '반려' }
 
-// 하루치 기록(case) 확정: 시공사 감독자 제출 → 감리 승인 → 발주처 승인.
-// 어느 역할이 서명할 차례인지는 컨트랙트가 강제한다. 시공사가 혼자 확정하려 하면 거부되고,
-// 반려·재제출 이력은 모두 온체인에 남는다.
+// 하루치 기록(case) 확정: 시공사 제출 -> 감리 승인 -> 발주처 승인 (순서는 컨트랙트가 강제)
 export default function CaseReview() {
   const [admins, setAdmins] = useState<Admin[]>([])
   const [reviewers, setReviewers] = useState<Reviewer[]>([])
@@ -65,6 +64,7 @@ export default function CaseReview() {
   const [siteId, setSiteId] = useState('')
   const [workDate, setWorkDate] = useState(today())
   const [bundle, setBundle] = useState<CaseBundle | null>(null)
+  const [check, setCheck] = useState<CaseVerify | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -89,8 +89,13 @@ export default function CaseReview() {
   async function loadCase() {
     if (!siteId || !workDate) return
     setError(null)
-    const res = await fetch(`${BACKEND_URL}/case/${encodeURIComponent(siteId)}/${workDate}`)
+    const path = `${encodeURIComponent(siteId)}/${workDate}`
+    const [res, verifyRes] = await Promise.all([
+      fetch(`${BACKEND_URL}/case/${path}`),
+      fetch(`${BACKEND_URL}/verify/case/${path}`),
+    ])
     if (res.ok) setBundle(await res.json())
+    if (verifyRes.ok) setCheck(await verifyRes.json())
   }
 
   async function post(path: string, body: object) {
@@ -202,6 +207,16 @@ export default function CaseReview() {
               )
             })}
           </div>
+
+          {check && bundle.state.round > 0 && (
+            <div className="space-y-2 pt-2">
+              <StatusBadge ok={check.scopeIntact} label="제출 범위 원문 = 온체인 scopeHash" />
+              <StatusBadge ok={check.recordsPresent} label="제출 범위의 기록이 전부 온체인에 존재" />
+              {check.addedAfterSubmit > 0 && (
+                <p className="text-xs text-ink-muted">제출 이후 추가된 기록 {check.addedAfterSubmit}건 (이번 승인 범위 밖)</p>
+              )}
+            </div>
+          )}
         </Card>
       )}
 

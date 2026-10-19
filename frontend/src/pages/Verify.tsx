@@ -15,25 +15,39 @@ type VerifyData = {
   overriddenBy?: string | null
 }
 
+type SiteVerify = {
+  onchain: boolean
+  sigValid: boolean
+  contentIntact: boolean
+  anchoredAt?: number
+  submittedBy: string | null
+}
+
+type Mode = 'checkin' | 'site'
+
 export default function Verify() {
+  const [mode, setMode] = useState<Mode>('checkin')
   const [nonce, setNonce] = useState('')
   const [data, setData] = useState<VerifyData | null>(null)
+  const [site, setSite] = useState<SiteVerify | null>(null)
   const [directOnchain, setDirectOnchain] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   async function check() {
     setError(null)
     setData(null)
+    setSite(null)
     setDirectOnchain(null)
     try {
-      const res = await fetch(`${BACKEND_URL}/verify/${nonce}`)
+      const res = await fetch(`${BACKEND_URL}/verify/${mode === 'site' ? 'site/' : ''}${nonce}`)
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.detail ?? '검증 실패')
       }
-      setData(await res.json())
+      if (mode === 'site') setSite(await res.json())
+      else setData(await res.json())
 
-      // 백엔드를 거치지 않고 프론트가 직접 체인에 물어본 결과. 둘이 일치해야 신뢰할 수 있다.
+      // 백엔드 안 거치고 체인에 직접 물어본 값 (백엔드 응답과 같아야 함)
       const direct = await isNonceUsedOnChain(nonce as `0x${string}`)
       setDirectOnchain(direct)
     } catch (e) {
@@ -44,6 +58,20 @@ export default function Verify() {
   return (
     <div className="space-y-5">
       <PageTitle title="검증뷰" subtitle="DB·사진 원본을 온체인 기록과 대조해 조작 여부를 확인합니다" />
+
+      <div className="flex gap-2">
+        {(['checkin', 'site'] as Mode[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            className={`px-3 py-1.5 text-sm font-display font-bold uppercase border-2 border-charcoal ${
+              mode === m ? 'bg-safety-yellow text-charcoal' : 'bg-white text-ink-muted'
+            }`}
+          >
+            {m === 'checkin' ? '게이트 검사' : '위험성평가'}
+          </button>
+        ))}
+      </div>
 
       <div className="flex gap-2">
         <Input
@@ -58,6 +86,21 @@ export default function Verify() {
       </div>
 
       {error && <ErrorText>{error}</ErrorText>}
+
+      {site && (
+        <Card>
+          <StatusBadge ok={site.onchain} label="온체인 기록 존재" />
+          <StatusBadge ok={site.sigValid} label="감독자 서명 = 온체인에 기록된 제출자" />
+          <StatusBadge ok={site.contentIntact} label="위험성평가 원문 해시 일치" />
+          {site.submittedBy && <p className="text-xs text-ink-muted">제출: {site.submittedBy}</p>}
+          {directOnchain !== null && (
+            <p className="text-xs text-ink-muted pt-3 border-t-2 border-charcoal/10">
+              체인 직접 확인 nonce 소진 = {directOnchain ? 'true' : 'false'}{' '}
+              {directOnchain === site.onchain ? '(백엔드 응답과 일치 ✅)' : '(불일치 ⚠️)'}
+            </p>
+          )}
+        </Card>
+      )}
 
       {data && (
         <Card>

@@ -15,8 +15,7 @@ import vision
 
 app = FastAPI(title="SafetyChain Backend")
 
-# 데모 규모(로컬 프론트 + 로컬 백엔드)라 오리진을 넓게 허용한다. 인증/로그인 자체가 없는
-# 스코프라 자격 증명(cookie)도 안 쓰므로 CORS를 좁힐 실익이 없다.
+# 로컬 데모용. 로그인/쿠키를 안 쓰니까 넓게 열어둠
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,6 +50,16 @@ def _startup() -> None:
 
 def _default_work_date() -> str:
     return date.today().isoformat()
+
+
+def _parse_nonce(nonce: str) -> bytes:
+    try:
+        b = chain.from_hex0x(nonce)
+    except ValueError:
+        b = b""
+    if len(b) != 32:
+        raise HTTPException(400, "invalid nonce")
+    return b
 
 
 @app.get("/reasons")
@@ -92,6 +101,10 @@ def gate_check(
         raise HTTPException(400, "nonce already used")
     if nonce_row["expires_at"] < int(time.time()):
         raise HTTPException(400, "nonce expired")
+    # 다른 사람 QR로 체크인 못하게
+    if nonce_row["worker_id"] != workerId or nonce_row["site_id"] != siteId:
+        raise HTTPException(400, "QR was issued for a different worker/site")
+    nonce_bytes = _parse_nonce(nonce)
 
     work_date = workDate or _default_work_date()
 
@@ -116,7 +129,7 @@ def gate_check(
         alcohol_pass=alcoholPass,
         model_hash=model_hash_bytes,
         evidence=evidence_bytes,
-        nonce=chain.from_hex0x(nonce),
+        nonce=nonce_bytes,
     )
 
     # Gatekeeper: 온체인에 기록이 확정된 뒤에만 판정 결과를 돌려준다.
@@ -169,12 +182,13 @@ def gate_override(req: OverrideRequest):
         raise HTTPException(400, "unknown reasonCode")
     if req.supervisorName not in chain.ADMIN_NAMES:
         raise HTTPException(400, "unknown supervisorName")
+    checkin_nonce = _parse_nonce(req.nonce)
     if db.get_checkin(req.nonce) is None:
         raise HTTPException(404, "no check-in recorded for this nonce")
 
     override_nonce = secrets.token_bytes(32)
     signed = chain.build_and_sign_override(
-        chain.from_hex0x(req.nonce), req.reasonCode, override_nonce, req.supervisorName
+        checkin_nonce, req.reasonCode, override_nonce, req.supervisorName
     )
     try:
         tx_hash = chain.submit_override(signed["override"], signed["signature"])
@@ -195,11 +209,15 @@ def gate_override(req: OverrideRequest):
 
 @app.get("/dashboard/{site}")
 def dashboard(site: str):
-    counts = db.dashboard_counts(site)
-    stats = chain.get_site_stats(site)  # 온체인 집계 (개인이 아니라 현장 단위)
+    stats = chain.get_site_stats(site)  # 검사·불합격·override 수는 온체인 값
+    checked = stats["checkIns"]
+    unchecked = db.count_unchecked(site)  # 만료된 QR 수는 오프체인에만 있음
     failed = stats["failed"]
+    total = checked + unchecked
     return {
-        **counts,
+        "checkedCount": checked,
+        "uncheckedCount": unchecked,
+        "rate": checked / total if total else 1.0,
         "failedCount": failed,
         "overrideCount": stats["overrides"],
         "overrideRate": (stats["overrides"] / failed) if failed else 0.0,
@@ -209,11 +227,12 @@ def dashboard(site: str):
 @app.get("/verify/{nonce}")
 def verify(nonce: str):
     """검사 기록 검증. 신뢰 기준은 온체인 값이고, DB와 사진 원본을 그것과 대조한다."""
+    nonce_bytes = _parse_nonce(nonce)
     record = db.get_checkin(nonce)
     if record is None:
         raise HTTPException(404, "no check-in recorded for this nonce")
 
-    onchain = chain.get_onchain_checkin(chain.from_hex0x(nonce))
+    onchain = chain.get_onchain_checkin(nonce_bytes)
     if onchain is None:
         return {"onchain": False, "sigValid": False, "modelHashMatch": False, "evidenceIntact": False,
                 "recordMatchesChain": False}
@@ -225,11 +244,15 @@ def verify(nonce: str):
 
     # 2) DB 원본이 온체인 기록과 같은가
     record_matches = (
-        bool(record["helmet_pass"]) == data["helmetPass"]
+        record["case_id"] == chain.to_hex0x(data["caseId"])
+        and chain.site_id_hash(record["site_id"]) == data["siteId"]
+        and bool(record["helmet_pass"]) == data["helmetPass"]
         and bool(record["shoes_pass"]) == data["shoesPass"]
         and bool(record["alcohol_pass"]) == data["alcoholPass"]
         and record["worker_id_hash"] == chain.to_hex0x(data["workerId"])
         and record["model_hash"] == chain.to_hex0x(data["modelHash"])
+        and record["evidence_hash"] == chain.to_hex0x(data["evidenceHash"])
+        and record["timestamp"] == data["timestamp"]
     )
 
     # 3) 사진 원본이 바뀌지 않았는가
@@ -371,11 +394,12 @@ def get_site_records(site: str):
 @app.get("/verify/site/{nonce}")
 def verify_site_record(nonce: str):
     """위험성평가 검증. DB 원문을 해시해서 '온체인에 저장된' recordHash와 비교한다."""
+    nonce_bytes = _parse_nonce(nonce)
     record = db.get_site_record(nonce)
     if record is None:
         raise HTTPException(404, "no site record found for this nonce")
 
-    onchain = chain.get_onchain_site_record(chain.from_hex0x(nonce))
+    onchain = chain.get_onchain_site_record(nonce_bytes)
     if onchain is None:
         return {"onchain": False, "sigValid": False, "contentIntact": False, "submittedBy": None}
     data = onchain["data"]
@@ -492,6 +516,12 @@ def review_case(req: CaseReviewRequest):
 
     case_id = chain.case_id_hash(req.siteId, req.workDate)
     state = chain.get_case_state(case_id)
+    # 검토자가 보는 목록(DB 원문)이 제출 때 그 목록인지 먼저 확인
+    submission = db.latest_case_submission(chain.to_hex0x(case_id))
+    if submission is None:
+        raise HTTPException(400, "case not submitted yet")
+    if chain.to_hex0x(chain.hash_text(submission["scope_json"])) != state["scopeHash"]:
+        raise HTTPException(409, "submitted scope does not match chain")
     action = chain.ACTION_APPROVE if req.decision == "approve" else chain.ACTION_REJECT
     reason = req.reasonCode if action == chain.ACTION_REJECT else 0
     # 제출된 범위(온체인 scopeHash) 그대로 승인/반려한다
@@ -523,25 +553,41 @@ def _do_case_action(case_id: bytes, scope_hash: bytes, action: int, reason: int,
 
 @app.get("/verify/case/{site}/{workDate}")
 def verify_case(site: str, workDate: str):
-    """제출된 검토 범위가 지금도 그대로인지 확인한다.
-    scopeIntact: DB에 남은 제출 원문의 해시 == 온체인 scopeHash
-    recordsPresent: 범위에 들어 있던 기록이 DB에서 하나도 사라지지 않았는가"""
     case_id = chain.case_id_hash(site, workDate)
     case_id_hex = chain.to_hex0x(case_id)
     state = chain.get_case_state(case_id)
     submission = db.latest_case_submission(case_id_hex)
     if submission is None or state["status"] == "None":
-        return {"status": state["status"], "scopeIntact": False, "recordsPresent": False}
+        return {"status": state["status"], "round": state["round"], "scopeIntact": False,
+                "recordsPresent": False, "addedAfterSubmit": 0}
 
-    submitted_scope = json.loads(submission["scope_json"])
-    scope_intact = chain.to_hex0x(chain.hash_text(_scope_json(submitted_scope))) == state["scopeHash"]
+    # 제출 원문 해시 == 온체인 scopeHash
+    scope_intact = chain.to_hex0x(chain.hash_text(submission["scope_json"])) == state["scopeHash"]
+    try:
+        submitted = json.loads(submission["scope_json"])
+        submitted = {k: submitted[k] for k in ("siteRecordNonces", "checkinNonces", "overrideNonces")}
+    except (ValueError, KeyError, TypeError):
+        return {"status": state["status"], "round": state["round"], "scopeIntact": False,
+                "recordsPresent": False, "addedAfterSubmit": 0}
+
+    # 범위 안의 기록이 전부 "체인에" 실제로 있는지 (DB끼리 비교 X)
+    def on_chain(fn, n):
+        try:
+            return bool(fn(chain.from_hex0x(n)))
+        except ValueError:
+            return False
+
+    records_present = (
+        all(on_chain(chain.get_onchain_site_record, n) for n in submitted["siteRecordNonces"])
+        and all(on_chain(chain.get_onchain_checkin, n) for n in submitted["checkinNonces"])
+        and all(on_chain(chain.is_nonce_used, n) for n in submitted["overrideNonces"])
+    )
     current = _case_scope(case_id_hex)
-    records_present = all(set(submitted_scope[k]) <= set(current[k]) for k in submitted_scope)
 
     return {
         "status": state["status"],
         "round": state["round"],
         "scopeIntact": scope_intact,
         "recordsPresent": records_present,
-        "addedAfterSubmit": sum(len(set(current[k]) - set(submitted_scope[k])) for k in current),
+        "addedAfterSubmit": sum(len(set(current[k]) - set(submitted[k])) for k in current),
     }

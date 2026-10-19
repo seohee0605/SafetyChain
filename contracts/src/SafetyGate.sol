@@ -6,22 +6,8 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 /// @title SafetyGate
-/// @notice 건설현장 출입 검사·위험성평가·감리/발주처 승인 기록을 온체인에 앵커링한다.
-///
-/// 설계 원칙 (1회차 멘토링 반영)
-/// 1. 역할 분리: 게이트 기기 / 시공사 감독자 / 감리 / 발주처가 서명할 수 있는 기록 종류가 다르다.
-///    게이트 기기 키로 감독자 승인을 만들거나, 감독자 키로 근로자 검사 기록을 만들 수 없다.
-/// 2. 서명자 등록 = 시공사 제안 + 감리·발주처 승인: 시공사 혼자 가짜 기기를 등록할 수 없다.
-/// 3. 소급 차단: 서명 시각이 블록 시각과 MAX_SIGNATURE_AGE 이상 차이 나면 거부한다.
-///    화면에는 서명 시각이 아니라 블록 시각(anchoredAt)을 보여준다.
-/// 4. Manual Override: AI가 보호구 불합격을 냈을 때 감독자가 사유 코드를 남겨 수동 처리한다.
-///    음주 불합격은 AI 판정이 아니므로 override할 수 없다. override 건수는 현장 통계에 남는다.
-/// 5. 다중 서명 확정: 하루치 기록(case)은 시공사 제출 → 감리 승인 → 발주처 승인을 거쳐야 확정된다.
-///    반려·재제출 이력은 모두 남는다(append-only).
-/// 6. 개인정보: 온체인에는 가명 ID, pass/fail, 해시, 서명자 주소만 올린다. 측정 수치·사진 원본은 오프체인.
-///
-/// 모든 기록은 "서명 + 릴레이" 방식이다. 서명자는 EIP-712로 서명만 하고,
-/// 가스비는 릴레이(백엔드)가 낸다. 그래서 기기·감리·발주처 키에 ETH가 필요 없다.
+/// @notice 출입 검사·위험성평가·감리/발주처 승인 기록 앵커링.
+/// 서명은 각 주체가 EIP-712로, 가스는 릴레이(백엔드)가 낸다.
 contract SafetyGate is AccessControl, EIP712 {
     using ECDSA for bytes32;
 
@@ -59,6 +45,7 @@ contract SafetyGate is AccessControl, EIP712 {
     uint8 public constant ACTION_SUBMIT = 1; // 시공사 감독자 제출
     uint8 public constant ACTION_APPROVE = 2; // 감리 또는 발주처 승인
     uint8 public constant ACTION_REJECT = 3; // 감리 또는 발주처 반려 (사유 코드 필수)
+    uint8 public constant REJECT_REASON_MAX = 5;
 
     // ------------------------------------------------------------------
     // EIP-712 타입
@@ -224,6 +211,7 @@ contract SafetyGate is AccessControl, EIP712 {
     error RoleNotAssignable(bytes32 role);
     error ProposalNotFound(uint256 proposalId);
     error ProposalAlreadyExecuted(uint256 proposalId);
+    error EmptyScope();
 
     /// @param contractorAdmin 시공사 운영 관리자 (보통 배포·릴레이 계정)
     /// @param inspector 감리 서명 주소
@@ -406,10 +394,11 @@ contract SafetyGate is AccessControl, EIP712 {
         bytes32 requiredRole = _requiredRoleFor(c.status, a.action);
 
         if (a.action == ACTION_REJECT) {
-            if (a.reasonCode == 0) revert InvalidReason(a.reasonCode);
+            if (a.reasonCode == 0 || a.reasonCode > REJECT_REASON_MAX) revert InvalidReason(a.reasonCode);
         } else if (a.reasonCode != 0) {
             revert InvalidReason(a.reasonCode);
         }
+        if (a.action == ACTION_SUBMIT && a.scopeHash == bytes32(0)) revert EmptyScope();
         if (a.action != ACTION_SUBMIT && a.scopeHash != c.scopeHash) revert ScopeMismatch(c.scopeHash, a.scopeHash);
 
         bytes32 structHash = keccak256(

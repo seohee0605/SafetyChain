@@ -5,7 +5,6 @@ import {Test} from "forge-std/Test.sol";
 import {SafetyGate} from "../src/SafetyGate.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
-/// 테스트 이름은 "어떤 공격/규칙을 검증하는지"가 드러나게 지었다.
 contract SafetyGateTest is Test {
     SafetyGate gate;
 
@@ -553,6 +552,81 @@ contract SafetyGateTest is Test {
         bytes memory sig = _signCaseAction(a, inspectorPk);
         vm.expectRevert(
             abi.encodeWithSelector(SafetyGate.InvalidCaseTransition.selector, SafetyGate.CaseStatus.None, 2)
+        );
+        gate.submitCaseAction(a, sig);
+    }
+    // ---- 추가 케이스 ----
+
+    function test_checkIn_timestampWindowEdgesAccepted() public {
+        SafetyGate.CheckIn memory c1 = _checkIn(_nonce(), true, true, true);
+        c1.timestamp = uint64(block.timestamp - 10 minutes);
+        gate.submitCheckIn(c1, _signCheckIn(c1, devicePk));
+
+        SafetyGate.CheckIn memory c2 = _checkIn(_nonce(), true, true, true);
+        c2.timestamp = uint64(block.timestamp + 1 minutes);
+        gate.submitCheckIn(c2, _signCheckIn(c2, devicePk));
+    }
+
+    function test_approveSigner_unknownProposalRejected() public {
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.ProposalNotFound.selector, 99));
+        gate.approveSigner(99, "");
+    }
+
+    function test_case_inspectorCannotGiveFinalApproval() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        _act(2, 0, SCOPE, inspectorPk);
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, SCOPE);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, inspector, gate.OWNER_ROLE()));
+        gate.submitCaseAction(a, sig);
+    }
+
+    function test_case_reviewerCannotSubmit() public {
+        SafetyGate.CaseAction memory a = _caseAction(1, 0, SCOPE);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, inspector, gate.SUPERVISOR_ROLE()));
+        gate.submitCaseAction(a, sig);
+    }
+
+    function test_case_ownerCanRejectAfterInspectorApproval() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        _act(2, 0, SCOPE, inspectorPk);
+        _act(3, 5, SCOPE, ownerPk);
+        assertEq(uint8(gate.getCase(CASE_ID).status), uint8(SafetyGate.CaseStatus.Rejected));
+    }
+
+    function test_case_cannotResubmitWhileUnderReview() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(1, 0, keccak256("swapped-scope"));
+        bytes memory sig = _signCaseAction(a, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.InvalidCaseTransition.selector, SafetyGate.CaseStatus.Submitted, 1)
+        );
+        gate.submitCaseAction(a, sig);
+    }
+
+    function test_case_rejectReasonOutOfRange() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(3, 6, SCOPE);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 6));
+        gate.submitCaseAction(a, sig);
+    }
+
+    function test_case_emptyScopeRejected() public {
+        SafetyGate.CaseAction memory a = _caseAction(1, 0, bytes32(0));
+        bytes memory sig = _signCaseAction(a, supervisorPk);
+        vm.expectRevert(SafetyGate.EmptyScope.selector);
+        gate.submitCaseAction(a, sig);
+    }
+
+    function test_case_backdatedActionRejected() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, SCOPE);
+        a.timestamp = uint64(block.timestamp - 1 days);
+        bytes memory sig = _signCaseAction(a, inspectorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, a.timestamp, uint64(block.timestamp))
         );
         gate.submitCaseAction(a, sig);
     }

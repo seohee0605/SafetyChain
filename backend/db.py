@@ -331,17 +331,10 @@ def list_case_actions(case_id: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def dashboard_counts(site_id: str) -> dict:
-    """checkedCount: 완료된 검사 수. uncheckedCount: 만료됐지만 검사로 이어지지 않은 QR 수."""
-    now = int(time.time())
+def count_unchecked(site_id: str) -> int:
+    # 발급만 되고 만료될 때까지 검사로 안 이어진 QR 수
     with get_conn() as conn:
-        checked = conn.execute(
-            "SELECT COUNT(*) AS c FROM checkins WHERE site_id = ?", (site_id,)
-        ).fetchone()["c"]
-        unchecked = conn.execute(
+        return conn.execute(
             "SELECT COUNT(*) AS c FROM nonces WHERE site_id = ? AND consumed = 0 AND expires_at < ?",
-            (site_id, now),
+            (site_id, int(time.time())),
         ).fetchone()["c"]
-    total = checked + unchecked
-    rate = (checked / total) if total else 1.0
-    return {"checkedCount": checked, "uncheckedCount": unchecked, "rate": rate}

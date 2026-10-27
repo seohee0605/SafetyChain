@@ -252,8 +252,12 @@ def _summ(xs):
     xs = [x for x in xs if x is not None]
     if not xs:
         return None
-    return {"n": len(xs), "mean": round(statistics.mean(xs), 2), "p50": round(_pct(xs, 50), 2),
-            "p95": round(_pct(xs, 95), 2), "max": round(max(xs), 2), "min": round(min(xs), 2)}
+
+    def r(v):  # 아주 작은 값(가스 가격 등)이 0.0으로 뭉개지지 않게 유효숫자 3자리
+        return round(v, 2) if abs(v) >= 1 or v == 0 else float(f"{v:.3g}")
+
+    return {"n": len(xs), "mean": r(statistics.mean(xs)), "p50": r(_pct(xs, 50)),
+            "p95": r(_pct(xs, 95)), "max": r(max(xs)), "min": r(min(xs))}
 
 
 def _rpc_latency_ms(n=10):
@@ -345,7 +349,7 @@ def cmd_report(a):
             "span": span,
             "blockIntervalAvgS": round((t_head - t_old) / span, 2),
             "blockIntervalLast30": _summ(gaps),
-            "localClockMinusHeadS": round(time.time() - t_head, 1),
+            "headAgeS": round(time.time() - t_head, 1),
             "rpcLatencyMs": _rpc_latency_ms(),
         },
         "sequential": {
@@ -399,7 +403,8 @@ def _render(r):
         f"측정 {r['measuredAt']}  체인 {r['chainId']}  RPC {r['rpc']}",
         f"블록 간격: 최근 {r['chain']['span']}블록 평균 {c['blockIntervalAvgS']}초 / 최근 30블록 {_fmt(c['blockIntervalLast30'])}",
         f"RPC 왕복: {_fmt(c['rpcLatencyMs'], 'ms')}",
-        f"이 컴퓨터 시계 - 최신 블록 시각: {c['localClockMinusHeadS']}초",
+        f"최신 블록 경과(블록 나이 + 시계 차이): {c['headAgeS']}초",
+        f"기기 시계 점검: 서명→블록 최솟값 {(sq['signToBlockS'] or {}).get('min')}초 (0 이상이면 기기 시계가 체인보다 빠르지 않음)",
         "",
         f"[차례로 검사] 성공 {sq['ok']}/{sq['count']}",
         f"  QR 발급              {_fmt(sq['qrIssueS'])}",
@@ -418,6 +423,7 @@ def _render(r):
     lines += [
         "",
         f"[가스] 출입 기록 1건 {_fmt(g['checkIn'], '')}",
+        f"       출입 기록 1건 수수료 {_fmt(g['checkInFeeEth'], ' ETH')}",
         f"       가스 가격 {_fmt(g['gasPriceGwei'], ' gwei')}",
         f"       위험성평가 1건 {_fmt(g['siteRecord'], '')}",
         "",

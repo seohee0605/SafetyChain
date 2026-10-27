@@ -5,3 +5,4 @@ __pycache__/
 safetychain.db
 models/*.pt
 uploads/
+pseudonym.key

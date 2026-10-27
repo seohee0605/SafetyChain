@@ -1,8 +1,9 @@
 """SQLite 저장소 (오프체인 원본).
 
 설계 원칙: 실명·연락처는 온체인에 올리지 않는다.
-workers 테이블(실명 매핑)과 sites 테이블(가명화 salt)은 이 파일에만 존재하고
-체인에는 절대 넘기지 않는다. checkins 테이블도 alcoholPass는 bool만 저장한다
+workers 테이블(실명 매핑)은 이 파일에만 존재하고 체인에는 절대 넘기지 않는다.
+온체인 workerId는 날짜별 HMAC 가명이고, 그 비밀키는 이 DB가 아니라 .env/키 파일에 있다
+(sites.salt는 예전 가명 방식의 흔적으로 남겨둔 테이블). checkins 테이블도 alcoholPass는 bool만 저장한다
 (음주 수치는 로그에도 남기지 않는다).
 
 이 DB는 "원본 보관소"일 뿐 신뢰 기준이 아니다. 검증 API는 항상 온체인 값과 대조한다.
@@ -65,7 +66,30 @@ CREATE TABLE IF NOT EXISTS checkins (
     image_path TEXT,               -- 사진 원본 위치 (오프체인)
     device_address TEXT NOT NULL,
     signature TEXT NOT NULL,
-    timestamp INTEGER NOT NULL
+    timestamp INTEGER NOT NULL,
+    entry_status TEXT,             -- 온체인 출입 상태 (Granted/Denied/HeldNoAssessment/LateAuditOnly)
+    device_seq INTEGER             -- 게이트 기기 일련번호
+);
+
+-- 게이트 기기의 일련번호 카운터 (기기 로컬 상태를 시뮬레이션). 서명할 때마다 1씩 증가
+CREATE TABLE IF NOT EXISTS device_state (
+    device_address TEXT PRIMARY KEY,
+    last_seq INTEGER NOT NULL
+);
+
+-- 시연 설정 (릴레이 모드 등)
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- 체인이 거부한 제출 (위조 서명·nonce 재사용·시간 초과 등). 온체인에는 흔적이 안 남아서 여기에 감사 로그로 남긴다
+CREATE TABLE IF NOT EXISTS rejected_submissions (
+    kind TEXT NOT NULL,
+    nonce TEXT,
+    site_id TEXT,
+    error TEXT NOT NULL,
+    at INTEGER NOT NULL
 );
 
 -- 감독자 Manual Override. AI 보호구 불합격을 사유 코드와 함께 수동 처리한 기록.
@@ -131,9 +155,10 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         # 이전 버전 DB 파일에 새 컬럼 추가
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkins)")}
-        for col in ("evidence_hash", "image_path"):
+        for col, typ in (("evidence_hash", "TEXT"), ("image_path", "TEXT"), ("entry_status", "TEXT"),
+                         ("device_seq", "INTEGER")):
             if col not in cols:
-                conn.execute(f"ALTER TABLE checkins ADD COLUMN {col} TEXT")
+                conn.execute(f"ALTER TABLE checkins ADD COLUMN {col} {typ}")
 
 
 def get_or_create_site_salt(site_id: str) -> str:
@@ -192,13 +217,16 @@ def record_checkin(
     timestamp: int,
     evidence_hash: str,
     image_path: str,
+    entry_status: str,
+    device_seq: int,
 ) -> None:
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO checkins
                (nonce, case_id, site_id, worker_id_hash, tx_hash, helmet_pass, shoes_pass,
-                alcohol_pass, model_hash, device_address, signature, timestamp, evidence_hash, image_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                alcohol_pass, model_hash, device_address, signature, timestamp, evidence_hash, image_path,
+                entry_status, device_seq)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 nonce,
                 case_id,
@@ -214,6 +242,8 @@ def record_checkin(
                 timestamp,
                 evidence_hash,
                 image_path,
+                entry_status,
+                device_seq,
             ),
         )
 
@@ -379,11 +409,50 @@ def delete_consent(worker_id: str, site_id: str) -> None:
         conn.execute("DELETE FROM consents WHERE worker_id = ? AND site_id = ?", (worker_id, site_id))
 
 
-def list_checkins_by_worker(worker_id_hash: str) -> list[sqlite3.Row]:
+def list_checkins_by_worker(worker_id: str, site_id: str) -> list[sqlite3.Row]:
+    # 가명이 날짜마다 바뀌므로 가명이 아니라 QR 발급 기록(오프체인 사번 매핑)으로 근로자 본인 기록을 찾는다
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM checkins WHERE worker_id_hash = ? ORDER BY timestamp DESC LIMIT 50", (worker_id_hash,)
+            """SELECT c.* FROM checkins c JOIN nonces n ON n.nonce = c.nonce
+               WHERE n.worker_id = ? AND n.site_id = ? ORDER BY c.timestamp DESC LIMIT 50""",
+            (worker_id, site_id),
         ).fetchall()
+
+
+def next_device_seq(device_address: str) -> int:
+    """게이트 기기의 다음 일련번호. 서명에 쓰인 번호는 체인 제출 실패와 무관하게 소진된다
+    (서명은 됐는데 체인에 없으면 그대로 '누락'으로 보이는 게 맞다)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO device_state (device_address, last_seq) VALUES (?, 1) "
+            "ON CONFLICT(device_address) DO UPDATE SET last_seq = last_seq + 1",
+            (device_address.lower(),),
+        )
+        return conn.execute(
+            "SELECT last_seq FROM device_state WHERE device_address = ?", (device_address.lower(),)
+        ).fetchone()["last_seq"]
+
+
+def get_setting(key: str, default: str) -> str:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def record_rejection(kind: str, nonce: str | None, site_id: str | None, error: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO rejected_submissions (kind, nonce, site_id, error, at) VALUES (?, ?, ?, ?, ?)",
+            (kind, nonce, site_id, error, int(time.time())),
+        )
 
 
 def unchecked_expiry_times(site_id: str, since: int) -> list[int]:

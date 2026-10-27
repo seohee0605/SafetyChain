@@ -12,7 +12,9 @@ from pydantic import BaseModel
 from web3.exceptions import ContractCustomError, ContractLogicError
 
 import chain
+import config
 import db
+import gate_device
 import vision
 
 app = FastAPI(title="SafetyChain Backend")
@@ -41,6 +43,13 @@ REJECT_REASONS = {
     4: "재검사 요구",
     5: "수동 처리(override) 사유 부적절",
 }
+REVOKE_REASONS = {
+    1: "키 유출 의심",
+    2: "기기 고장·교체",
+    3: "현장 철수",
+}
+# 시공사 릴레이 모드 (시연용): 정상 / 전부 중단 / 불합격만 빼고 제출
+RELAY_MODES = ("normal", "paused", "drop_failed")
 
 ONCHAIN_ERRORS = (ContractLogicError, ContractCustomError, chain.OnchainRejected)
 
@@ -69,7 +78,13 @@ def reasons():
     return {
         "override": [{"code": k, "label": v} for k, v in OVERRIDE_REASONS.items()],
         "reject": [{"code": k, "label": v} for k, v in REJECT_REASONS.items()],
+        "revoke": [{"code": k, "label": v} for k, v in REVOKE_REASONS.items()],
     }
+
+
+def _require_demo_controls() -> None:
+    if not config.DEMO_CONTROLS:
+        raise HTTPException(403, "demo controls are disabled (set DEMO_CONTROLS=1)")
 
 
 # ======================================================================
@@ -128,21 +143,29 @@ def withdraw_consent(req: QrIssueRequest):
 
 @app.get("/worker/{site}/{worker}/records")
 def worker_records(site: str, worker: str):
-    worker_hash = chain.to_hex0x(chain.worker_id_hash(worker, db.get_or_create_site_salt(site)))
     out = []
-    for c in db.list_checkins_by_worker(worker_hash):
-        passed = bool(c["helmet_pass"] and c["shoes_pass"] and c["alcohol_pass"])
+    for c in db.list_checkins_by_worker(worker, site):
         overridden = db.get_override_for_checkin(c["nonce"]) is not None
         out.append({
             "nonce": c["nonce"],
             "at": c["timestamp"],
-            "result": "pass" if passed else ("override" if overridden else "fail"),
+            "result": _worker_result(c["entry_status"], overridden),
             "helmetPass": bool(c["helmet_pass"]),
             "shoesPass": bool(c["shoes_pass"]),
             "alcoholPass": bool(c["alcohol_pass"]),
             "txHash": c["tx_hash"],
         })
     return out
+
+
+def _worker_result(entry_status: str | None, overridden: bool) -> str:
+    if entry_status == "Granted":
+        return "pass"
+    if entry_status == "HeldNoAssessment":
+        return "held"
+    if entry_status == "LateAuditOnly":
+        return "late"
+    return "override" if overridden else "fail"
 
 
 class GateError(Exception):
@@ -163,9 +186,10 @@ def _check_gate_request(nonce: str, workerId: str, siteId: str) -> bytes:
     return _parse_nonce(nonce)
 
 
-def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worker_id, site_id, work_date):
-    """검사 -> 기기 서명 -> 온체인 기록 -> 확정. 단계가 끝날 때마다 상태를 내보낸다.
-    판정 결과는 온체인 확정 뒤에만 나간다 (Gatekeeper)."""
+def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worker_id, site_id, work_date,
+               signed_minutes_ago=0):
+    """검사 -> 기기 서명 -> 감사 저장소 전달 -> 온체인 기록 -> 확정. 단계가 끝날 때마다 상태를 내보낸다.
+    판정 결과는 온체인 확정 뒤에만 나간다 (Gatekeeper). 출입 허가 여부는 컨트랙트가 정한 EntryStatus를 따른다."""
     yield {"stage": "inspecting"}
     image_path = UPLOAD_DIR / f"{nonce_bytes.hex()}_{Path(image_name or 'capture.jpg').name}"
     image_path.write_bytes(image_bytes)
@@ -173,10 +197,10 @@ def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worke
     ppe = vision.check_ppe(str(image_path))
 
     yield {"stage": "signing"}
-    site_salt = db.get_or_create_site_salt(site_id)
     case_id_bytes = chain.case_id_hash(site_id, work_date)
-    worker_id_bytes = chain.worker_id_hash(worker_id, site_salt)
+    worker_id_bytes = chain.worker_id_hash(worker_id, site_id, work_date)
     model_hash_bytes = vision.get_model_hash()
+    device_seq = gate_device.next_seq()
     signed = chain.build_and_sign_checkin(
         case_id=case_id_bytes,
         worker_id=worker_id_bytes,
@@ -187,14 +211,46 @@ def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worke
         model_hash=model_hash_bytes,
         evidence=evidence_bytes,
         nonce=nonce_bytes,
+        device_seq=device_seq,
+        # 시연: 오프체인 상태에서 N분 전에 서명해 둔 기록을 지금 재전송하는 상황
+        signed_at=int(time.time()) - signed_minutes_ago * 60 if signed_minutes_ago else None,
     )
+
+    # 게이트가 체인 제출 전에 감리 감사 저장소로 원본 사본을 먼저 보낸다 (시공사 릴레이와 독립된 경로)
+    yield {"stage": "auditing"}
+    audit_delivered = gate_device.send_to_audit(signed["checkin"], signed["signature"])
+
+    all_passed = ppe["helmetPass"] and ppe["shoesPass"] and alcohol_pass
+    base_result = {
+        "nonce": nonce,
+        "deviceSeq": device_seq,
+        "auditDelivered": audit_delivered,
+        "helmetPass": ppe["helmetPass"],
+        "shoesPass": ppe["shoesPass"],
+        "alcoholPass": alcohol_pass,
+        "verdict": all_passed,
+    }
+
+    # 시연: 시공사가 릴레이를 멈추거나 불합격 기록만 빼는 상황. 시공사 DB에도 안 남기고 체인에도 안 낸다
+    relay_mode = db.get_setting("relay_mode", "normal") if config.DEMO_CONTROLS else "normal"
+    if relay_mode == "paused" or (relay_mode == "drop_failed" and not all_passed):
+        db.consume_nonce(nonce)
+        yield {
+            "stage": "not_anchored",
+            "result": {**base_result, "anchored": False, "txHash": None, "entryStatus": None,
+                       "entryAllowed": False, "overridable": False},
+        }
+        return
 
     yield {"stage": "anchoring"}
     try:
         tx_hash = chain.submit_checkin(signed["checkin"], signed["signature"])
     except ONCHAIN_ERRORS as e:
+        db.record_rejection("checkin", nonce, site_id, chain.describe_error(e))
         raise GateError(f"on-chain submission rejected: {chain.describe_error(e)}") from e
 
+    onchain = chain.get_onchain_checkin(nonce_bytes)
+    entry_status = onchain["status"] if onchain else None
     db.consume_nonce(nonce)
     db.record_checkin(
         nonce=nonce,
@@ -211,22 +267,30 @@ def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worke
         timestamp=signed["checkin"]["timestamp"],
         evidence_hash=chain.to_hex0x(evidence_bytes),
         image_path=str(image_path),
+        entry_status=entry_status,
+        device_seq=device_seq,
     )
 
-    verdict = ppe["helmetPass"] and ppe["shoesPass"] and alcohol_pass
     yield {
         "stage": "confirmed",
         "result": {
+            **base_result,
+            "anchored": True,
             "txHash": tx_hash,
-            "verdict": verdict,
-            "nonce": nonce,
-            "helmetPass": ppe["helmetPass"],
-            "shoesPass": ppe["shoesPass"],
-            "alcoholPass": alcohol_pass,
-            # 음주 불합격은 AI 판정이 아니라서 수동 처리 대상이 아니다
-            "overridable": (not verdict) and alcohol_pass,
+            "entryStatus": entry_status,
+            "entryAllowed": entry_status == "Granted",
+            # 수동 처리는 '보호구 불합격(Denied)'에만. 음주 불합격·평가 전 보류·지연 도착은 불가
+            "overridable": entry_status == "Denied" and alcohol_pass,
         },
     }
+
+
+def _check_delay(signed_minutes_ago: int) -> None:
+    if signed_minutes_ago == 0:
+        return
+    _require_demo_controls()
+    if not 0 < signed_minutes_ago <= 48 * 60:
+        raise HTTPException(400, "signedMinutesAgo must be between 1 and 2880")
 
 
 @app.post("/gate/check")
@@ -237,13 +301,15 @@ def gate_check(
     workerId: str = Form(...),
     siteId: str = Form(...),
     workDate: str = Form(None),
+    signedMinutesAgo: int = Form(0),
 ):
     nonce_bytes = _check_gate_request(nonce, workerId, siteId)
+    _check_delay(signedMinutesAgo)
     steps = _gate_steps(nonce, nonce_bytes, image.file.read(), image.filename, alcoholPass, workerId, siteId,
-                        workDate or _default_work_date())
+                        workDate or _default_work_date(), signedMinutesAgo)
     try:
         for step in steps:
-            if step["stage"] == "confirmed":
+            if step["stage"] in ("confirmed", "not_anchored"):
                 return step["result"]
     except GateError as e:
         raise HTTPException(400, str(e))
@@ -257,12 +323,14 @@ def gate_check_stream(
     workerId: str = Form(...),
     siteId: str = Form(...),
     workDate: str = Form(None),
+    signedMinutesAgo: int = Form(0),
 ):
     """/gate/check과 같은데 단계마다 한 줄씩(NDJSON) 보내서 키오스크가 진행 상황을 보여줄 수 있게 한다."""
     nonce_bytes = _check_gate_request(nonce, workerId, siteId)
+    _check_delay(signedMinutesAgo)
     image_bytes = image.file.read()  # 응답 스트리밍 전에 읽어둔다
     steps = _gate_steps(nonce, nonce_bytes, image_bytes, image.filename, alcoholPass, workerId, siteId,
-                        workDate or _default_work_date())
+                        workDate or _default_work_date(), signedMinutesAgo)
 
     def lines():
         try:
@@ -300,6 +368,7 @@ def gate_override(req: OverrideRequest):
     try:
         tx_hash = chain.submit_override(signed["override"], signed["signature"])
     except ONCHAIN_ERRORS as e:
+        db.record_rejection("override", req.nonce, None, chain.describe_error(e))
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
 
     db.record_override(
@@ -311,7 +380,11 @@ def gate_override(req: OverrideRequest):
         tx_hash=tx_hash,
         timestamp=signed["override"]["timestamp"],
     )
-    return {"txHash": tx_hash, "reason": OVERRIDE_REASONS[req.reasonCode], "entryAllowed": True}
+    return {
+        "txHash": tx_hash,
+        "reason": OVERRIDE_REASONS[req.reasonCode],
+        "entryAllowed": chain.is_entry_allowed(checkin_nonce),
+    }
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -332,7 +405,10 @@ def dashboard(site: str):
     # 최근 7일 추이: 검사·불합격·override는 온체인 기록(블록 시각) 기준
     today = datetime.now(KST).date()
     days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
-    daily = {d: {"date": d, "checked": 0, "unchecked": 0, "failed": 0, "overrides": 0} for d in days}
+    daily = {
+        d: {"date": d, "checked": 0, "unchecked": 0, "failed": 0, "overrides": 0, "held": 0, "late": 0}
+        for d in days
+    }
     onchain = chain.list_site_checkins(site)
     for c in onchain:
         d = daily.get(_kst_day(c["anchoredAt"]))
@@ -344,6 +420,10 @@ def dashboard(site: str):
             d["failed"] += 1
         if c["overridden"]:
             d["overrides"] += 1
+        if c["status"] == "HeldNoAssessment":
+            d["held"] += 1
+        elif c["status"] == "LateAuditOnly":
+            d["late"] += 1
     week_start = int(datetime.combine(today - timedelta(days=6), datetime.min.time(), KST).timestamp())
     for ts in db.unchecked_expiry_times(site, week_start):
         d = daily.get(_kst_day(ts))
@@ -370,6 +450,9 @@ def dashboard(site: str):
         "failedCount": failed,
         "overrideCount": stats["overrides"],
         "overrideRate": (stats["overrides"] / failed) if failed else 0.0,
+        # 검사 건수에 포함되지만 출입 근거가 아닌 기록 (온체인 집계)
+        "heldCount": stats["held"],
+        "lateCount": stats["late"],
         "noIncidentDays": no_incident_days,
         "noIncidentSince": since,
         "lastIncidentDate": last_incident,
@@ -422,6 +505,7 @@ def verify(nonce: str):
         and record["model_hash"] == chain.to_hex0x(data["modelHash"])
         and record["evidence_hash"] == chain.to_hex0x(data["evidenceHash"])
         and record["timestamp"] == data["timestamp"]
+        and (record["device_seq"] is None or record["device_seq"] == data["deviceSeq"])
     )
 
     # 3) 사진 원본이 바뀌지 않았는가
@@ -440,6 +524,9 @@ def verify(nonce: str):
         "modelHashMatch": model_hash_match,
         "anchoredAt": onchain["anchoredAt"],
         "device": onchain["device"],
+        "entryStatus": onchain["status"],
+        "entryAllowed": chain.is_entry_allowed(nonce_bytes),
+        "deviceSeq": data["deviceSeq"],
         "overridden": onchain["overridden"],
         "overrideReason": OVERRIDE_REASONS.get(onchain["overrideReason"]),
         "overriddenBy": chain.name_for_address(onchain["overriddenBy"]) if onchain["overridden"] else None,
@@ -515,6 +602,7 @@ def submit_site_record(req: SiteRecordRequest):
     try:
         tx_hash = chain.submit_site_record(signed["record"], signed["signature"])
     except ONCHAIN_ERRORS as e:
+        db.record_rejection("site_record", chain.to_hex0x(nonce_bytes), req.siteId, chain.describe_error(e))
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
 
     nonce_hex = chain.to_hex0x(nonce_bytes)
@@ -606,6 +694,8 @@ def _serialize_checkin_row(c) -> dict:
         "timestamp": c["timestamp"],
         "overridden": o is not None,
         "overrideReason": OVERRIDE_REASONS.get(o["reason_code"]) if o else None,
+        "entryStatus": c["entry_status"],
+        "deviceSeq": c["device_seq"],
     }
 
 
@@ -760,3 +850,89 @@ def verify_case(site: str, workDate: str):
         "recordsPresent": records_present,
         "addedAfterSubmit": sum(len(set(current[k]) - set(submitted[k])) for k in current),
     }
+
+
+# ======================================================================
+# 게이트 기기 · 서명자 해제 이력 · 시연 제어
+# ======================================================================
+
+
+@app.get("/devices")
+def list_devices():
+    """게이트 기기별 온체인 일련번호 집계 (누락 = 받은 최대 번호 - 받은 건수)."""
+    stats = chain.get_device_stats(chain.DEVICE_ADDRESS)
+    return [{
+        "address": chain.DEVICE_ADDRESS,
+        "name": chain.name_for_address(chain.DEVICE_ADDRESS),
+        "active": chain.has_role("device", chain.DEVICE_ADDRESS),
+        **stats,
+    }]
+
+
+@app.get("/signers/revocations")
+def list_revocations():
+    return [{**r, "reason": REVOKE_REASONS.get(r["reasonCode"])} for r in chain.get_revocations()]
+
+
+class RevokeRequest(BaseModel):
+    role: str = "device"  # "device" | "supervisor"
+    address: str | None = None  # 비우면 데모 게이트 기기
+    reasonCode: int
+
+
+@app.post("/signers/revoke")
+def revoke_signer(req: RevokeRequest):
+    """시공사 운영 관리자의 즉시 해제. 사유 코드·해제 시점 일련번호가 체인 이력에 남아 감리가 확인한다.
+    로그인이 없는 데모 백엔드라 시연 제어가 켜져 있을 때만 연다."""
+    _require_demo_controls()
+    if req.role not in chain.ROLE_IDS:
+        raise HTTPException(400, "role must be device or supervisor")
+    if req.reasonCode not in REVOKE_REASONS:
+        raise HTTPException(400, "unknown reasonCode")
+    address = req.address or chain.DEVICE_ADDRESS
+    try:
+        tx_hash = chain.revoke_signer(req.role, address, req.reasonCode)
+    except ONCHAIN_ERRORS as e:
+        raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
+    return {"txHash": tx_hash, "reason": REVOKE_REASONS[req.reasonCode]}
+
+
+class RegisterRequest(BaseModel):
+    role: str = "device"
+    address: str | None = None
+
+
+@app.post("/signers/register")
+def register_signer(req: RegisterRequest):
+    """시연용 재등록: 시공사 제안 + 감리 승인 서명 (데모에서만 백엔드가 감리 키를 갖고 있음)."""
+    _require_demo_controls()
+    if req.role not in chain.ROLE_IDS:
+        raise HTTPException(400, "role must be device or supervisor")
+    address = req.address or chain.DEVICE_ADDRESS
+    if chain.has_role(req.role, address):
+        raise HTTPException(400, "already registered")
+    try:
+        tx_hash = chain.register_signer(req.role, address)
+    except ONCHAIN_ERRORS as e:
+        raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
+    return {"txHash": tx_hash}
+
+
+class RelayModeRequest(BaseModel):
+    mode: str
+
+
+@app.get("/demo/relay")
+def get_relay_mode():
+    return {"mode": db.get_setting("relay_mode", "normal"), "demoControls": config.DEMO_CONTROLS}
+
+
+@app.post("/demo/relay")
+def set_relay_mode(req: RelayModeRequest):
+    """시연: 시공사 릴레이를 멈추거나(paused) 불합격만 빼고(drop_failed) 제출하게 만든다.
+    게이트 → 감사 저장소 경로는 그대로라, 감리 화면에 '체인 미제출' 기록이 쌓이는 걸 보여줄 수 있다."""
+    _require_demo_controls()
+    if req.mode not in RELAY_MODES:
+        raise HTTPException(400, f"mode must be one of {RELAY_MODES}")
+    db.set_setting("relay_mode", req.mode)
+    return {"mode": req.mode}

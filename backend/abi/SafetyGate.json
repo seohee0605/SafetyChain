@@ -61,6 +61,32 @@
   },
   {
     "type": "function",
+    "name": "CHECKIN_LATE_LIMIT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "CHECKIN_ON_TIME",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "CONTRACTOR_ADMIN_ROLE",
     "inputs": [],
     "outputs": [
@@ -68,6 +94,19 @@
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DAY_OFFSET",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -114,19 +153,6 @@
   {
     "type": "function",
     "name": "MAX_CLOCK_SKEW",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "MAX_SIGNATURE_AGE",
     "inputs": [],
     "outputs": [
       {
@@ -204,7 +230,72 @@
   },
   {
     "type": "function",
+    "name": "RECORD_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "REJECT_REASON_MAX",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "REVOKE_DEVICE_REPLACED",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "REVOKE_KEY_COMPROMISED",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "REVOKE_REASON_MAX",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "REVOKE_SITE_CLOSED",
     "inputs": [],
     "outputs": [
       {
@@ -285,6 +376,47 @@
         "name": "extensions",
         "type": "uint256[]",
         "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getAssessment",
+    "inputs": [
+      {
+        "name": "caseId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.Assessment",
+        "components": [
+          {
+            "name": "siteId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "hazardsControlled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "recordNonce",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "anchoredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -448,6 +580,11 @@
                 "internalType": "bytes32"
               },
               {
+                "name": "deviceSeq",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
                 "name": "timestamp",
                 "type": "uint64",
                 "internalType": "uint64"
@@ -458,6 +595,11 @@
             "name": "device",
             "type": "address",
             "internalType": "address"
+          },
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum SafetyGate.EntryStatus"
           },
           {
             "name": "anchoredAt",
@@ -566,6 +708,11 @@
                 "internalType": "bytes32"
               },
               {
+                "name": "deviceSeq",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
                 "name": "timestamp",
                 "type": "uint64",
                 "internalType": "uint64"
@@ -576,6 +723,11 @@
             "name": "device",
             "type": "address",
             "internalType": "address"
+          },
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum SafetyGate.EntryStatus"
           },
           {
             "name": "anchoredAt",
@@ -599,6 +751,37 @@
           },
           {
             "name": "overriddenAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getDeviceStats",
+    "inputs": [
+      {
+        "name": "device",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.DeviceStats",
+        "components": [
+          {
+            "name": "highestSeq",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "received",
             "type": "uint64",
             "internalType": "uint64"
           }
@@ -647,6 +830,56 @@
             "name": "approvedBy",
             "type": "address",
             "internalType": "address"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getRevocations",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple[]",
+        "internalType": "struct SafetyGate.Revocation[]",
+        "components": [
+          {
+            "name": "role",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "reasonCode",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "revokedBy",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "revokedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "lastSeq",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "missingAtRevoke",
+            "type": "uint64",
+            "internalType": "uint64"
           }
         ]
       }
@@ -848,6 +1081,16 @@
             "name": "overrides",
             "type": "uint64",
             "internalType": "uint64"
+          },
+          {
+            "name": "held",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "late",
+            "type": "uint64",
+            "internalType": "uint64"
           }
         ]
       }
@@ -898,6 +1141,25 @@
   },
   {
     "type": "function",
+    "name": "isEntryAllowed",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isNonceUsed",
     "inputs": [
       {
@@ -911,6 +1173,25 @@
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "missingCount",
+    "inputs": [
+      {
+        "name": "device",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -1001,6 +1282,11 @@
         "name": "account",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "reasonCode",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "outputs": [],
@@ -1128,6 +1414,11 @@
             "name": "nonce",
             "type": "bytes32",
             "internalType": "bytes32"
+          },
+          {
+            "name": "deviceSeq",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
             "name": "timestamp",
@@ -1320,10 +1611,22 @@
         "internalType": "bool"
       },
       {
+        "name": "status",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum SafetyGate.EntryStatus"
+      },
+      {
         "name": "device",
         "type": "address",
         "indexed": false,
         "internalType": "address"
+      },
+      {
+        "name": "deviceSeq",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       }
     ],
     "anonymous": false
@@ -1442,6 +1745,31 @@
   },
   {
     "type": "event",
+    "name": "SequenceGap",
+    "inputs": [
+      {
+        "name": "device",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "fromSeq",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "toSeq",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "SignerApproved",
     "inputs": [
       {
@@ -1498,6 +1826,43 @@
         "type": "address",
         "indexed": false,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SignerRevoked",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "reasonCode",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "revokedBy",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "lastSeq",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       }
     ],
     "anonymous": false
@@ -1600,6 +1965,38 @@
   },
   {
     "type": "error",
+    "name": "CheckInNotOverridable",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "status",
+        "type": "uint8",
+        "internalType": "enum SafetyGate.EntryStatus"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DuplicateSequence",
+    "inputs": [
+      {
+        "name": "device",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "seq",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "ECDSAInvalidSignature",
     "inputs": []
   },
@@ -1654,6 +2051,17 @@
         "name": "reasonCode",
         "type": "uint8",
         "internalType": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidSequence",
+    "inputs": [
+      {
+        "name": "seq",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },
@@ -1735,6 +2143,22 @@
         "name": "given",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SignerNotActive",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },

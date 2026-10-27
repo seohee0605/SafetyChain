@@ -30,8 +30,8 @@ SafetyChain은 안전모·안전화·음주 검사 결과, 일일 위험성평�
 
 1. **감시 대상은 노동자가 아니라 회사다** — 개인을 지목하는 UI를 만들지 않는다
 2. **음주 측정 수치는 온체인·로그 어디에도 남기지 않는다** — `alcoholPass: bool`만 저장
-3. **실명·연락처는 온체인에 절대 올리지 않는다** — `workerId = keccak256(사번 || siteSalt)`
-   가명 식별자만 온체인에 가고, 실명 매핑은 오프체인 SQLite에만 존재
+3. **실명·연락처는 온체인에 절대 올리지 않는다** — `workerId = HMAC-SHA256(비밀키, 사번|현장|작업일)`
+   날짜별 가명만 온체인에 가서 장기간 출근 패턴이 이어지지 않고, 실명 매핑은 오프체인 SQLite에만 존재
 
 ## 아키텍처
 
@@ -60,7 +60,11 @@ SafetyChain은 안전모·안전화·음주 검사 결과, 일일 위험성평�
 
 - `DEFAULT_ADMIN_ROLE`은 아무에게도 없어서 `grantRole`로 역할을 임의로 줄 수 없습니다.
 - 게이트 기기·감독자는 시공사가 제안하고 감리 또는 발주처가 승인 서명을 해야 등록됩니다.
-- 서명 시각이 블록 시각 기준 10분 전 ~ 1분 후 밖이면 거부됩니다 (`StaleTimestamp`).
+- 출입 기록은 거부 대신 저장 후 분류합니다: 서명 후 10분 이내 정상, 24시간까지는 지연 도착(감사용, 출입 근거 X),
+  그 이상이나 1분 넘는 미래 시각은 거부(`StaleTimestamp`). 위험성평가·수동 처리·케이스 승인은 1시간 안에 제출해야 합니다.
+- 당일(KST) 위험성평가가 체인에 없으면 출입 기록은 "평가 전 보류"로 남고, 감독자 수동 처리로도 풀 수 없습니다.
+- 게이트 기기는 기록마다 일련번호(`deviceSeq`)를 서명합니다. 체인은 기기별 빠진 번호(`missingCount`)를 공개하고,
+  서명자 해제는 사유 코드·해제 시점 번호와 함께 이력(`getRevocations`)으로 남습니다.
 - 검증뷰는 DB 원본·사진을 DB끼리가 아니라 온체인 저장값과 대조합니다.
 
 ## 기술 스택
@@ -99,7 +103,7 @@ safetychain/
 cd contracts
 forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
 anvil                                   # 별도 터미널에서 로컬 체인 실행
-forge test                              # 46개 테스트
+forge test                              # 76개 테스트
 
 # 배포 + 게이트 기기/감독자 등록 (감리 키로 승인 서명까지 스크립트에서 처리)
 export DEVICE_ADDRESS=0x...
@@ -118,7 +122,22 @@ cp .env.example .env                    # CONTRACT_ADDRESS, 각 역할 키 채�
 uvicorn main:app --reload
 ```
 
-### 3. 프론트엔드
+### 3. 감리 감사 저장소
+
+시공사 백엔드와 별도 프로세스·별도 DB로 띄우는 감리 쪽 서비스입니다. 게이트가 서명한 기록 사본을
+체인 제출 전에 직접 받아 보관하고, 체인 값과 대조해 미제출·바꿔치기를 드러냅니다.
+
+```bash
+cd audit
+pip install -r requirements.txt
+cp .env.example .env                    # CONTRACT_ADDRESS (시연 때는 AUDIT_GRACE_SECONDS=30 권장)
+uvicorn main:app --port 8100
+```
+
+백엔드 `.env`의 `AUDIT_URL`이 이 주소를 가리켜야 합니다. `DEMO_CONTROLS=1`이면 감리 감사 화면에서
+릴레이 중단·불합격만 누락·기기 해제/재등록을 시연할 수 있습니다.
+
+### 4. 프론트엔드
 
 ```bash
 cd frontend
@@ -126,7 +145,7 @@ npm install
 npm run dev                             # http://localhost:5173
 ```
 
-### 4. 근로자 앱을 폰으로 열기 (같은 와이파이)
+### 5. 근로자 앱을 폰으로 열기 (같은 와이파이)
 
 ```bash
 cd backend && uvicorn main:app --host 0.0.0.0 --reload

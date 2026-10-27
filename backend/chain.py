@@ -11,6 +11,7 @@
 """
 
 import hashlib
+import hmac
 import json
 import time
 from pathlib import Path
@@ -86,6 +87,7 @@ CHECKIN_TYPES = {
         {"name": "modelHash", "type": "bytes32"},
         {"name": "evidenceHash", "type": "bytes32"},
         {"name": "nonce", "type": "bytes32"},
+        {"name": "deviceSeq", "type": "uint64"},
         {"name": "timestamp", "type": "uint64"},
     ],
 }
@@ -124,6 +126,13 @@ CASE_ACTION_TYPES = {
 ACTION_SUBMIT, ACTION_APPROVE, ACTION_REJECT = 1, 2, 3
 CASE_STATUS = ["None", "Submitted", "InspectorApproved", "Finalized", "Rejected"]
 ACTION_NAMES = {1: "submit", 2: "approve", 3: "reject"}
+# 컨트랙트 EntryStatus enum 순서와 같아야 한다
+ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly"]
+ROLE_IDS = {
+    "device": Web3.keccak(text="GATE_DEVICE_ROLE"),
+    "supervisor": Web3.keccak(text="SUPERVISOR_ROLE"),
+}
+ROLE_NAMES = {v: k for k, v in ROLE_IDS.items()}
 
 
 # ----------------------------------------------------------------------
@@ -139,9 +148,15 @@ def from_hex0x(s: str) -> bytes:
     return bytes.fromhex(s[2:] if s.startswith("0x") else s)
 
 
-def worker_id_hash(worker_id_plain: str, site_salt: str) -> bytes:
-    """workerId = keccak256(사번 || siteSalt). siteSalt는 오프체인 DB에만 있어야 한다."""
-    return Web3.keccak(text=worker_id_plain + site_salt)
+def worker_id_hash(worker_id_plain: str, site_id_plain: str, work_date: str) -> bytes:
+    """날짜별 가명: workerId = HMAC-SHA256(비밀키, 사번|현장|작업일).
+
+    같은 근로자라도 날짜가 바뀌면 값이 달라져서, 공개 체인에서 장기간 출근 패턴·불합격 이력이
+    한 사람으로 이어지지 않는다. 비밀키는 DB가 아니라 .env(또는 별도 키 파일)에 있어서
+    DB만 유출돼서는 역산할 수 없다. 사고 조사 때는 키를 가진 담당자만 다시 계산해 대조한다.
+    """
+    msg = f"{worker_id_plain}|{site_id_plain}|{work_date}".encode()
+    return hmac.new(config.WORKER_PSEUDONYM_KEY, msg, hashlib.sha256).digest()
 
 
 def site_id_hash(site_id_plain: str) -> bytes:
@@ -244,7 +259,10 @@ def build_and_sign_checkin(
     model_hash: bytes,
     evidence: bytes,
     nonce: bytes,
+    device_seq: int,
+    signed_at: int | None = None,
 ) -> dict:
+    """게이트 기기 키로 서명. device_seq는 기기가 매기는 일련번호(빠진 번호 = 누락)."""
     checkin = {
         "caseId": case_id,
         "workerId": worker_id,
@@ -255,7 +273,8 @@ def build_and_sign_checkin(
         "modelHash": model_hash,
         "evidenceHash": evidence,
         "nonce": nonce,
-        "timestamp": _now(),
+        "deviceSeq": device_seq,
+        "timestamp": signed_at if signed_at is not None else _now(),
     }
     return {"checkin": checkin, "signature": _sign(CHECKIN_TYPES, checkin, _device_account)}
 
@@ -351,7 +370,7 @@ def get_onchain_checkin(nonce: bytes) -> dict | None:
     if not is_nonce_used(nonce):
         return None
     try:
-        data, device, anchored_at, overridden, reason, overridden_by, overridden_at = (
+        data, device, status, anchored_at, overridden, reason, overridden_by, overridden_at = (
             contract.functions.getCheckIn(nonce).call()
         )
     except Exception:
@@ -360,6 +379,7 @@ def get_onchain_checkin(nonce: bytes) -> dict | None:
     return {
         "data": dict(zip(fields, data)),
         "device": device,
+        "status": ENTRY_STATUS[status],
         "anchoredAt": anchored_at,
         "overridden": overridden,
         "overrideReason": reason,
@@ -377,8 +397,68 @@ def get_onchain_site_record(nonce: bytes) -> dict | None:
 
 
 def get_site_stats(site_id_plain: str) -> dict:
-    checkins, failed, overrides = contract.functions.getSiteStats(site_id_hash(site_id_plain)).call()
-    return {"checkIns": checkins, "failed": failed, "overrides": overrides}
+    checkins, failed, overrides, held, late = contract.functions.getSiteStats(site_id_hash(site_id_plain)).call()
+    return {"checkIns": checkins, "failed": failed, "overrides": overrides, "held": held, "late": late}
+
+
+def is_entry_allowed(nonce: bytes) -> bool:
+    return contract.functions.isEntryAllowed(nonce).call()
+
+
+def get_assessment(case_id: bytes) -> dict:
+    site_id, controlled, record_nonce, anchored_at = contract.functions.getAssessment(case_id).call()
+    return {
+        "exists": anchored_at != 0,
+        "hazardsControlled": controlled,
+        "recordNonce": to_hex0x(record_nonce),
+        "anchoredAt": anchored_at,
+    }
+
+
+def get_device_stats(address: str) -> dict:
+    highest, received = contract.functions.getDeviceStats(Web3.to_checksum_address(address)).call()
+    return {"highestSeq": highest, "received": received, "missing": highest - received}
+
+
+def get_revocations() -> list[dict]:
+    return [
+        {
+            "role": ROLE_NAMES.get(role, to_hex0x(role)),
+            "account": account,
+            "accountName": name_for_address(account) or account,
+            "reasonCode": reason,
+            "revokedBy": by,
+            "revokedAt": at,
+            "lastSeq": last_seq,
+            "missingAtRevoke": missing,
+        }
+        for role, account, reason, by, at, last_seq, missing in contract.functions.getRevocations().call()
+    ]
+
+
+def has_role(role: str, address: str) -> bool:
+    return contract.functions.hasRole(ROLE_IDS[role], Web3.to_checksum_address(address)).call()
+
+
+# ----------------------------------------------------------------------
+# 서명자 해제·등록 (시공사 운영 관리자 = 릴레이 계정)
+# ----------------------------------------------------------------------
+
+
+def revoke_signer(role: str, address: str, reason_code: int) -> str:
+    """시공사가 즉시 해제한다. 사유 코드와 해제 시점 일련번호가 체인에 이력으로 남는다."""
+    return _send(contract.functions.revokeSigner(ROLE_IDS[role], Web3.to_checksum_address(address), reason_code))
+
+
+def register_signer(role: str, address: str) -> str:
+    """시공사 제안 + 감리 승인 서명. 데모에서만 백엔드가 감리 키로 승인 서명까지 한다."""
+    account = Web3.to_checksum_address(address)
+    _send(contract.functions.proposeSigner(ROLE_IDS[role], account))
+    proposal_id = contract.functions.proposalCount().call() - 1
+    digest = contract.functions.signerApprovalDigest(proposal_id).call()
+    _, inspector = reviewer_account("inspector")
+    sig = inspector.unsafe_sign_hash(digest).signature
+    return _send(contract.functions.approveSigner(proposal_id, sig))
 
 
 def get_case_state(case_id: bytes) -> dict:
@@ -410,6 +490,11 @@ def list_site_checkins(site_id_plain: str, limit: int = 500) -> list[dict]:
     rows = contract.functions.getCheckIns(site_id_hash(site_id_plain), max(0, total - limit), total).call()
     fields = [f["name"] for f in CHECKIN_TYPES["CheckIn"]]
     return [
-        {"data": dict(zip(fields, data)), "anchoredAt": anchored_at, "overridden": overridden}
-        for data, _device, anchored_at, overridden, _reason, _by, _at in rows
+        {
+            "data": dict(zip(fields, data)),
+            "status": ENTRY_STATUS[status],
+            "anchoredAt": anchored_at,
+            "overridden": overridden,
+        }
+        for data, _device, status, anchored_at, overridden, _reason, _by, _at in rows
     ]

@@ -229,8 +229,15 @@ def describe_error(e: Exception) -> str:
 def _send(fn) -> str:
     """릴레이 계정으로 트랜잭션을 보내고, 블록에 포함될 때까지 기다린다.
     게이트는 이 함수가 성공(=온체인 확정)한 뒤에만 결과를 돌려준다 (Gatekeeper)."""
+    # 가스 추정은 'pending' 블록 기준으로 한다. 'latest' 기준이면 블록이 한동안 안 생긴 로컬 체인(Anvil)에서
+    # 마지막 블록 시각으로 시간 검증이 돌아가, 방금 서명한 기록이 '미래 시각(StaleTimestamp)'으로 잘못 거부된다.
+    gas = fn.estimate_gas({"from": _sender_account.address}, block_identifier="pending")
     tx = fn.build_transaction(
-        {"from": _sender_account.address, "nonce": w3.eth.get_transaction_count(_sender_account.address)}
+        {
+            "from": _sender_account.address,
+            "nonce": w3.eth.get_transaction_count(_sender_account.address),
+            "gas": int(gas * 1.2),  # 테스트넷 업그레이드 후 추정 오차 대비 여유분
+        }
     )
     signed_tx = _sender_account.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)

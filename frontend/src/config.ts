@@ -4,7 +4,7 @@ export const BACKEND_URL = `http://${window.location.hostname}:8000`
 export const AUDIT_URL = `http://${window.location.hostname}:8100`
 // 게이트 기기 서비스: 기기 키·YOLO를 가진 쪽. 키오스크는 시공사 백엔드가 아니라 여기로 검사를 보낸다
 export const GATE_URL = `http://${window.location.hostname}:8200`
-export const RPC_URL = 'https://sepolia.drpc.org'
-export const CONTRACT_ADDRESS = '0xEE54363cC9E336B2ce1327dBe206D2514568cbC4' as const
+export const RPC_URL = 'https://ethereum-sepolia-rpc.publicnode.com'
+export const CONTRACT_ADDRESS = '0x082f20bC3dCcFB393bed97Cdc75E6C2DFd2f4d05' as const
 // 로컬 체인이면 탐색기 링크 없음
 export const EXPLORER_URL = /127\.0\.0\.1|localhost/.test(RPC_URL) ? '' : 'https://sepolia.etherscan.io'

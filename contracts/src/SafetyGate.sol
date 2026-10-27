@@ -36,8 +36,12 @@ contract SafetyGate is AccessControl, EIP712 {
     uint64 public constant CHECKIN_LATE_LIMIT = 24 hours;
     /// @notice 위험성평가·Override·Case 승인: 서명 시점에 서명하고 이 시간 안에 제출해야 한다. 지연 단계 없음.
     uint64 public constant RECORD_WINDOW = 1 hours;
-    /// @notice 기기 시계 오차 허용치. 서명 시각이 블록 시각보다 이만큼 이상 미래면 거부한다.
+    /// @notice 기기 시계 오차 허용치. 서명 시각이 블록 시각보다 이만큼 이상 미래면 정상으로 보지 않는다.
     uint64 public constant MAX_CLOCK_SKEW = 1 minutes;
+    /// @notice 출입 검사: 1분 넘게 미래지만 이 시간 안이면 '의심(기기 시계 이상)'으로 저장, 넘으면 거부.
+    uint64 public constant CHECKIN_SUSPECT_FUTURE = 10 minutes;
+    /// @notice 일회용 QR의 최대 유효기간. 발급~만료가 이보다 길면 일회용 출입 권한으로 보지 않는다.
+    uint64 public constant MAX_QR_TTL = 10 minutes;
     /// @notice '해당 날짜' 판정 기준 시간대 (KST = UTC+9). 위험성평가는 출입과 같은 KST 날짜에 체인에 올라와야 유효하다.
     uint64 public constant DAY_OFFSET = 9 hours;
 
@@ -46,6 +50,12 @@ contract SafetyGate is AccessControl, EIP712 {
     uint8 public constant REVOKE_DEVICE_REPLACED = 2; // 기기 고장·교체
     uint8 public constant REVOKE_SITE_CLOSED = 3; // 현장 철수
     uint8 public constant REVOKE_REASON_MAX = 3;
+
+    /// @notice 긴급·장비 장애 예외 출입 사유 코드.
+    uint8 public constant EMERGENCY_GATE_FAULT = 1; // 게이트 장비 장애
+    uint8 public constant EMERGENCY_RESCUE = 2; // 응급·구조 대응
+    uint8 public constant EMERGENCY_POWER_NETWORK = 3; // 정전·통신 장애
+    uint8 public constant EMERGENCY_REASON_MAX = 3;
 
     /// @notice Override 사유 코드 (온체인에는 코드만, 자유 텍스트는 올리지 않는다).
     uint8 public constant OVERRIDE_FALSE_POSITIVE = 1; // AI 오탐 (육안 확인 결과 착용)
@@ -64,13 +74,16 @@ contract SafetyGate is AccessControl, EIP712 {
     // ------------------------------------------------------------------
 
     bytes32 private constant CHECKIN_TYPEHASH = keccak256(
-        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 deviceSeq,uint64 timestamp)"
+        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 qrIssuedAt,uint64 qrExpiresAt,uint64 deviceSeq,uint64 timestamp)"
     );
     bytes32 private constant SITE_RECORD_TYPEHASH = keccak256(
         "SiteRecord(bytes32 caseId,bytes32 siteId,bytes32 recordHash,bool hazardsControlled,bytes32 nonce,uint64 timestamp)"
     );
     bytes32 private constant OVERRIDE_TYPEHASH =
         keccak256("Override(bytes32 checkInNonce,uint8 reasonCode,bytes32 nonce,uint64 timestamp)");
+    bytes32 private constant EMERGENCY_TYPEHASH = keccak256(
+        "EmergencyEntry(bytes32 caseId,bytes32 siteId,bytes32 workerId,uint8 reasonCode,bytes32 nonce,uint64 timestamp)"
+    );
     bytes32 private constant CASE_ACTION_TYPEHASH = keccak256(
         "CaseAction(bytes32 caseId,bytes32 scopeHash,uint8 action,uint8 reasonCode,bytes32 nonce,uint64 timestamp)"
     );
@@ -91,6 +104,8 @@ contract SafetyGate is AccessControl, EIP712 {
         bytes32 modelHash; // 판정에 쓴 AI 모델 가중치 해시
         bytes32 evidenceHash; // 검사 사진 원본의 해시 (원본은 오프체인)
         bytes32 nonce; // 일회용 QR nonce
+        uint64 qrIssuedAt; // QR 발급 시각 (서명 시각의 하한: 이 시점 이후에 검사됨)
+        uint64 qrExpiresAt; // QR 만료 시각 (서명 시각의 상한)
         uint64 deviceSeq; // 기기별 일련번호 (1부터 1씩 증가). 빠진 번호 = 제출되지 않은 기록
         uint64 timestamp; // 기기가 서명한 시각 (블록 시각과 비교해 분류)
     }
@@ -111,6 +126,16 @@ contract SafetyGate is AccessControl, EIP712 {
         uint64 timestamp;
     }
 
+    /// @notice 긴급·장비 장애 예외 출입. 감독자 서명 + 감리 또는 발주처 서명이 둘 다 있어야 한다.
+    struct EmergencyEntry {
+        bytes32 caseId;
+        bytes32 siteId;
+        bytes32 workerId; // 가명 식별자
+        uint8 reasonCode; // EMERGENCY_* 코드
+        bytes32 nonce;
+        uint64 timestamp;
+    }
+
     struct CaseAction {
         bytes32 caseId;
         bytes32 scopeHash; // 검토 대상 기록(nonce 목록)의 해시. 제출한 범위 그대로 승인해야 한다
@@ -124,13 +149,14 @@ contract SafetyGate is AccessControl, EIP712 {
     // 저장 구조체
     // ------------------------------------------------------------------
 
-    /// @notice 출입 검사 기록의 출입 판정. 우선순위: 지연 > 평가 없음 > 위험요인 미조치 > 불합격 > 허가.
+    /// @notice 출입 검사 기록의 출입 판정. 우선순위: 의심·지연 > 평가 없음 > 위험요인 미조치 > 불합격 > 허가.
     enum EntryStatus {
         Granted, // 당일 위험성평가 완료 + 보호구·음주 합격 + 제시간 제출
         Denied, // 보호구 또는 음주 불합격 (보호구는 감독자 Override 가능)
         HeldNoAssessment, // 당일 이 현장의 위험성평가가 체인에 없음 → 출입 보류, 시도 사실은 남김
         LateAuditOnly, // 늦게 도착한 기록 → 검사 사실은 남기되 출입 근거로 쓰지 않음
-        HeldHazardsOpen // 당일 평가는 있지만 위험요인이 미조치 → 출입 보류
+        HeldHazardsOpen, // 당일 평가는 있지만 위험요인이 미조치 → 출입 보류
+        SuspectTimestamp // 기기 시계가 블록 시각보다 1~10분 앞섬 → 의심 표시와 함께 저장, 출입 근거 X
     }
 
     struct StoredCheckIn {
@@ -156,6 +182,15 @@ contract SafetyGate is AccessControl, EIP712 {
         uint64 overrides; // 감독자 수동 처리 건수
         uint64 held; // 위험성평가 전 출입 시도(보류) 건수
         uint64 late; // 지연 도착(감사용) 건수
+        uint64 suspect; // 기기 시계 이상 의심 건수
+        uint64 emergencies; // 긴급·장비 장애 예외 출입 건수
+    }
+
+    struct StoredEmergency {
+        EmergencyEntry data;
+        address supervisor;
+        address approver; // 감리 또는 발주처
+        uint64 anchoredAt;
     }
 
     /// @notice 현장·작업일(caseId)별 최신 위험성평가 상태.
@@ -237,6 +272,8 @@ contract SafetyGate is AccessControl, EIP712 {
     mapping(address device => DeviceStats) private _deviceStats;
     mapping(address device => mapping(uint64 seq => bool)) private _seqUsed;
     Revocation[] private _revocations;
+    mapping(bytes32 nonce => StoredEmergency) private _emergencies;
+    mapping(bytes32 siteId => bytes32[] nonces) private _emergencyNoncesBySite;
 
     // ------------------------------------------------------------------
     // 이벤트 / 에러
@@ -250,6 +287,9 @@ contract SafetyGate is AccessControl, EIP712 {
         EntryStatus status,
         address device,
         uint64 deviceSeq
+    );
+    event EmergencyEntryRecorded(
+        bytes32 indexed siteId, bytes32 nonce, uint8 reasonCode, address supervisor, address approver
     );
     event SequenceGap(address indexed device, uint64 fromSeq, uint64 toSeq);
     event SignerRevoked(
@@ -281,6 +321,8 @@ contract SafetyGate is AccessControl, EIP712 {
     error DuplicateSequence(address device, uint64 seq);
     error SignerNotActive(bytes32 role, address account);
     error CheckInNotOverridable(bytes32 nonce, EntryStatus status);
+    error InvalidQrWindow(uint64 issuedAt, uint64 expiresAt);
+    error QrNotValidAtSigning(uint64 issuedAt, uint64 expiresAt, uint64 signedAt);
 
     /// @param contractorAdmin 시공사 운영 관리자 (보통 배포·릴레이 계정)
     /// @param inspector 감리 서명 주소
@@ -376,17 +418,20 @@ contract SafetyGate is AccessControl, EIP712 {
     // ==================================================================
 
     /// @notice 출입 검사 기록. 서명·nonce·역할이 맞으면 거부하지 않고 저장한 뒤 출입 상태로 분류한다.
-    ///   - 서명 후 10분 이내 → 정상, 10분~24시간 → 지연(감사용), 24시간 초과·미래 시각 → 거부
+    ///   - 서명 후 10분 이내 → 정상, 10분~24시간 → 지연(감사용), 24시간 초과 → 거부
+    ///   - 기기 시계가 1~10분 앞섬 → 의심(감사용), 10분 넘게 앞섬 → 거부
+    ///   - 서명 시각이 QR 발급~만료 사이가 아니면 거부 (만료된 QR로는 출입 기록이 생기지 않음)
     ///   - 당일 위험성평가가 없으면 '보류'로 저장 (시도 사실은 남김)
     ///   - 기기 일련번호로 제출되지 않은 기록(누락)을 드러낸다
     function submitCheckIn(CheckIn calldata c, bytes calldata sig) external {
         _consumeNonce(c.nonce);
-        bool onTime = _classifyCheckInTiming(c.timestamp);
+        _checkQrWindow(c);
+        Timing timing = _classifyCheckInTiming(c.timestamp);
         address device = _recoverWithRole(_checkInStructHash(c), sig, GATE_DEVICE_ROLE);
         _recordSequence(device, c.deviceSeq);
 
         bool allPassed = c.helmetPass && c.shoesPass && c.alcoholPass;
-        EntryStatus status = _entryStatus(c, onTime, allPassed);
+        EntryStatus status = _entryStatus(c, timing, allPassed);
 
         StoredCheckIn storage s = _checkIns[c.nonce];
         s.data = c;
@@ -400,6 +445,7 @@ contract SafetyGate is AccessControl, EIP712 {
         if (!allPassed) st.failed += 1;
         if (status == EntryStatus.HeldNoAssessment || status == EntryStatus.HeldHazardsOpen) st.held += 1;
         if (status == EntryStatus.LateAuditOnly) st.late += 1;
+        if (status == EntryStatus.SuspectTimestamp) st.suspect += 1;
 
         emit CheckInRecorded(c.siteId, c.workerId, c.nonce, allPassed, status, device, c.deviceSeq);
     }
@@ -465,6 +511,40 @@ contract SafetyGate is AccessControl, EIP712 {
         });
 
         emit SiteRecordSubmitted(r.siteId, r.nonce, r.hazardsControlled, supervisor);
+    }
+
+    // ==================================================================
+    // 긴급·장비 장애 예외 출입 (감독자 + 감리 또는 발주처)
+    // ==================================================================
+
+    /// @notice 게이트 고장·응급 상황 등으로 정상 검사를 못 할 때의 별도 절차.
+    /// 감독자 혼자서는 안 되고, 감리 또는 발주처가 같은 내용에 함께 서명해야 기록된다.
+    /// 출입 검사 기록(CheckIn)과 분리돼 현장 통계·감리 화면에 따로 집계된다.
+    function submitEmergencyEntry(EmergencyEntry calldata e, bytes calldata supervisorSig, bytes calldata reviewerSig)
+        external
+    {
+        _consumeNonce(e.nonce);
+        _checkRecordWindow(e.timestamp);
+        if (e.reasonCode == 0 || e.reasonCode > EMERGENCY_REASON_MAX) revert InvalidReason(e.reasonCode);
+
+        bytes32 structHash = keccak256(
+            abi.encode(EMERGENCY_TYPEHASH, e.caseId, e.siteId, e.workerId, e.reasonCode, e.nonce, e.timestamp)
+        );
+        address supervisor = _recoverWithRole(structHash, supervisorSig, SUPERVISOR_ROLE);
+        address approver = _hashTypedDataV4(structHash).recover(reviewerSig);
+        if (!hasRole(INSPECTOR_ROLE, approver) && !hasRole(OWNER_ROLE, approver)) {
+            revert MissingRole(approver, INSPECTOR_ROLE);
+        }
+
+        StoredEmergency storage s = _emergencies[e.nonce];
+        s.data = e;
+        s.supervisor = supervisor;
+        s.approver = approver;
+        s.anchoredAt = uint64(block.timestamp);
+        _emergencyNoncesBySite[e.siteId].push(e.nonce);
+        _siteStats[e.siteId].emergencies += 1;
+
+        emit EmergencyEntryRecorded(e.siteId, e.nonce, e.reasonCode, supervisor, approver);
     }
 
     // ==================================================================
@@ -566,6 +646,24 @@ contract SafetyGate is AccessControl, EIP712 {
         return d.highestSeq - d.received;
     }
 
+    function getEmergencyEntry(bytes32 nonce) external view returns (StoredEmergency memory) {
+        return _emergencies[nonce];
+    }
+
+    function getEmergencyEntries(bytes32 siteId, uint256 from, uint256 to)
+        external
+        view
+        returns (StoredEmergency[] memory)
+    {
+        bytes32[] storage nonces = _emergencyNoncesBySite[siteId];
+        (uint256 start, uint256 end) = _range(nonces.length, from, to);
+        StoredEmergency[] memory result = new StoredEmergency[](end - start);
+        for (uint256 i = start; i < end; i++) {
+            result[i - start] = _emergencies[nonces[i]];
+        }
+        return result;
+    }
+
     function getRevocations() external view returns (Revocation[] memory) {
         return _revocations;
     }
@@ -609,10 +707,34 @@ contract SafetyGate is AccessControl, EIP712 {
         _usedNonces[nonce] = true;
     }
 
-    /// @dev 출입 검사 시각 분류. 미래(+1분 초과)·24시간 초과는 거부, 10분 이내면 true(정상), 그 사이는 false(지연).
-    function _classifyCheckInTiming(uint64 signedAt) private view returns (bool onTime) {
-        _checkWithin(signedAt, CHECKIN_LATE_LIMIT);
-        return block.timestamp <= uint256(signedAt) + CHECKIN_ON_TIME;
+    enum Timing {
+        OnTime,
+        Late,
+        Suspect
+    }
+
+    /// @dev 출입 검사 시각 분류.
+    ///   미래 10분 초과·과거 24시간 초과 → 거부 / 미래 1~10분 → 의심 / 과거 10분~24시간 → 지연 / 그 외 → 정상
+    function _classifyCheckInTiming(uint64 signedAt) private view returns (Timing) {
+        if (
+            uint256(signedAt) > block.timestamp + CHECKIN_SUSPECT_FUTURE
+                || block.timestamp > uint256(signedAt) + CHECKIN_LATE_LIMIT
+        ) {
+            revert StaleTimestamp(signedAt, uint64(block.timestamp));
+        }
+        if (uint256(signedAt) > block.timestamp + MAX_CLOCK_SKEW) return Timing.Suspect;
+        if (block.timestamp > uint256(signedAt) + CHECKIN_ON_TIME) return Timing.Late;
+        return Timing.OnTime;
+    }
+
+    /// @dev QR 유효기간: 발급~만료가 MAX_QR_TTL 이하이고, 게이트 서명 시각이 그 사이여야 한다.
+    function _checkQrWindow(CheckIn calldata c) private pure {
+        if (c.qrExpiresAt <= c.qrIssuedAt || c.qrExpiresAt - c.qrIssuedAt > MAX_QR_TTL) {
+            revert InvalidQrWindow(c.qrIssuedAt, c.qrExpiresAt);
+        }
+        if (c.timestamp < c.qrIssuedAt || c.timestamp > c.qrExpiresAt) {
+            revert QrNotValidAtSigning(c.qrIssuedAt, c.qrExpiresAt, c.timestamp);
+        }
     }
 
     /// @dev 위험성평가·Override·Case 승인: [블록 시각 - 1시간, 블록 시각 + 1분] 밖이면 거부.
@@ -630,7 +752,8 @@ contract SafetyGate is AccessControl, EIP712 {
         return keccak256(
             bytes.concat(
                 abi.encode(CHECKIN_TYPEHASH, c.caseId, c.workerId, c.siteId, c.helmetPass, c.shoesPass),
-                abi.encode(c.alcoholPass, c.modelHash, c.evidenceHash, c.nonce, c.deviceSeq, c.timestamp)
+                abi.encode(c.alcoholPass, c.modelHash, c.evidenceHash, c.nonce),
+                abi.encode(c.qrIssuedAt, c.qrExpiresAt, c.deviceSeq, c.timestamp)
             )
         );
     }
@@ -649,8 +772,9 @@ contract SafetyGate is AccessControl, EIP712 {
         d.received += 1;
     }
 
-    function _entryStatus(CheckIn calldata c, bool onTime, bool allPassed) private view returns (EntryStatus) {
-        if (!onTime) return EntryStatus.LateAuditOnly;
+    function _entryStatus(CheckIn calldata c, Timing timing, bool allPassed) private view returns (EntryStatus) {
+        if (timing == Timing.Suspect) return EntryStatus.SuspectTimestamp;
+        if (timing == Timing.Late) return EntryStatus.LateAuditOnly;
         Assessment storage a = _assessments[c.caseId];
         // 출입 허가 조건 ①: 당일(KST) 이 현장의 위험성평가가 체인에 있고, 위험요인 조치가 끝났어야 한다.
         // caseId는 게이트가 넣는 값이라, 어제 caseId를 재사용하지 못하도록 평가의 블록 시각 날짜까지 확인한다.

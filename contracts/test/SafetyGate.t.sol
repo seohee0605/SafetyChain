@@ -29,13 +29,16 @@ contract SafetyGateTest is Test {
     bytes32 constant SCOPE = keccak256("nonces-of-day");
 
     bytes32 constant CHECKIN_TYPEHASH = keccak256(
-        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 deviceSeq,uint64 timestamp)"
+        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 qrIssuedAt,uint64 qrExpiresAt,uint64 deviceSeq,uint64 timestamp)"
     );
     bytes32 constant SITE_RECORD_TYPEHASH = keccak256(
         "SiteRecord(bytes32 caseId,bytes32 siteId,bytes32 recordHash,bool hazardsControlled,bytes32 nonce,uint64 timestamp)"
     );
     bytes32 constant OVERRIDE_TYPEHASH =
         keccak256("Override(bytes32 checkInNonce,uint8 reasonCode,bytes32 nonce,uint64 timestamp)");
+    bytes32 constant EMERGENCY_TYPEHASH = keccak256(
+        "EmergencyEntry(bytes32 caseId,bytes32 siteId,bytes32 workerId,uint8 reasonCode,bytes32 nonce,uint64 timestamp)"
+    );
     bytes32 constant CASE_ACTION_TYPEHASH = keccak256(
         "CaseAction(bytes32 caseId,bytes32 scopeHash,uint8 action,uint8 reasonCode,bytes32 nonce,uint64 timestamp)"
     );
@@ -100,32 +103,29 @@ contract SafetyGateTest is Test {
             modelHash: MODEL_HASH,
             evidenceHash: keccak256("photo-bytes"),
             nonce: nonce,
+            qrIssuedAt: uint64(block.timestamp - 1 minutes),
+            qrExpiresAt: uint64(block.timestamp + 4 minutes),
             deviceSeq: ++seqCounter,
             timestamp: uint64(block.timestamp)
         });
     }
 
+    /// @dev 테스트가 서명 시각을 바꿔도 QR 유효기간이 그 시각을 감싸도록 맞춘 뒤 서명한다 (QR 테스트는 _signCheckInRaw 사용)
     function _signCheckIn(SafetyGate.CheckIn memory c, uint256 pk) internal view returns (bytes memory) {
-        return _sign(
-            pk,
-            keccak256(
-                abi.encode(
-                    CHECKIN_TYPEHASH,
-                    c.caseId,
-                    c.workerId,
-                    c.siteId,
-                    c.helmetPass,
-                    c.shoesPass,
-                    c.alcoholPass,
-                    c.modelHash,
-                    c.evidenceHash,
-                    c.nonce,
-                    c.deviceSeq,
-                    c.timestamp
-                )
-            )
-        );
+        if (c.timestamp < c.qrIssuedAt || c.timestamp > c.qrExpiresAt) {
+            c.qrIssuedAt = c.timestamp - 1 minutes;
+            c.qrExpiresAt = c.timestamp + 4 minutes;
+        }
+        return _signCheckInRaw(c, pk);
     }
+
+    function _signCheckInRaw(SafetyGate.CheckIn memory c, uint256 pk) internal view returns (bytes memory) {
+        bytes memory head = abi.encode(CHECKIN_TYPEHASH, c.caseId, c.workerId, c.siteId, c.helmetPass, c.shoesPass);
+        bytes memory mid = abi.encode(c.alcoholPass, c.modelHash, c.evidenceHash, c.nonce);
+        bytes memory tail = abi.encode(c.qrIssuedAt, c.qrExpiresAt, c.deviceSeq, c.timestamp);
+        return _sign(pk, keccak256(bytes.concat(head, mid, tail)));
+    }
+
 
     function _submitCheckIn(bool helmet, bool shoes, bool alcohol) internal returns (bytes32 nonce) {
         nonce = _nonce();
@@ -345,9 +345,9 @@ contract SafetyGateTest is Test {
         gate.submitCheckIn(c, sig);
     }
 
-    function test_checkIn_futureTimestampRejected() public {
+    function test_checkIn_farFutureTimestampRejected() public {
         SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
-        c.timestamp = uint64(block.timestamp + 5 minutes);
+        c.timestamp = uint64(block.timestamp + 10 minutes + 1);
         bytes memory sig = _signCheckIn(c, devicePk);
         vm.expectRevert(
             abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, c.timestamp, uint64(block.timestamp))
@@ -1020,5 +1020,161 @@ contract SafetyGateTest is Test {
         vm.warp(block.timestamp + 1 days);
         bytes32 nonce = _submitCheckIn(true, true, true);
         assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+    }
+
+    // ==================================================================
+    // 12. 의심 상태: 기기 시계가 앞선 기록은 거부 대신 '의심'으로 저장 (Q1)
+    // ==================================================================
+
+    function test_checkIn_clockAhead_storedAsSuspect() public {
+        _assess(true);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.timestamp = uint64(block.timestamp + 5 minutes); // 기기 시계가 5분 빠름
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+        assertEq(uint8(_status(c.nonce)), uint8(SafetyGate.EntryStatus.SuspectTimestamp));
+        assertFalse(gate.isEntryAllowed(c.nonce));
+        assertEq(gate.getSiteStats(SITE_ID).suspect, 1);
+    }
+
+    function test_checkIn_clockSkewWithin1Minute_isNormal() public {
+        _assess(true);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.timestamp = uint64(block.timestamp + 1 minutes);
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+        assertEq(uint8(_status(c.nonce)), uint8(SafetyGate.EntryStatus.Granted));
+    }
+
+    function test_override_cannotApplyToSuspectRecord() public {
+        _assess(true);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), false, true, true);
+        c.timestamp = uint64(block.timestamp + 5 minutes);
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+        SafetyGate.Override memory o = _override(c.nonce, 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafetyGate.CheckInNotOverridable.selector, c.nonce, SafetyGate.EntryStatus.SuspectTimestamp
+            )
+        );
+        gate.submitOverride(o, sig);
+    }
+
+    // ==================================================================
+    // 13. QR 유효기간을 온체인에서 검사 (Q3)
+    // ==================================================================
+
+    function test_qr_usedAfterExpiry_rejected() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.qrIssuedAt = uint64(block.timestamp - 10 minutes);
+        c.qrExpiresAt = uint64(block.timestamp - 5 minutes); // 5분 전에 만료된 QR로 지금 검사
+        bytes memory sig = _signCheckInRaw(c, devicePk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.QrNotValidAtSigning.selector, c.qrIssuedAt, c.qrExpiresAt, c.timestamp)
+        );
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_qr_usedBeforeIssue_rejected() public {
+        // QR 발급 시각보다 앞선 서명 = '이 시점 이후에 만들어졌다'는 하한 위반
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.qrIssuedAt = uint64(block.timestamp + 30);
+        c.qrExpiresAt = uint64(block.timestamp + 4 minutes);
+        bytes memory sig = _signCheckInRaw(c, devicePk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.QrNotValidAtSigning.selector, c.qrIssuedAt, c.qrExpiresAt, c.timestamp)
+        );
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_qr_validityLongerThanMax_rejected() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.qrIssuedAt = uint64(block.timestamp - 1 minutes);
+        c.qrExpiresAt = uint64(block.timestamp + 1 days); // 하루짜리 QR은 일회용 출입 권한이 아님
+        bytes memory sig = _signCheckInRaw(c, devicePk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidQrWindow.selector, c.qrIssuedAt, c.qrExpiresAt));
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_qr_windowStoredOnChain() public {
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        SafetyGate.StoredCheckIn memory s = gate.getCheckIn(nonce);
+        assertEq(s.data.qrIssuedAt, block.timestamp - 1 minutes);
+        assertEq(s.data.qrExpiresAt, block.timestamp + 4 minutes);
+    }
+
+    // ==================================================================
+    // 14. 긴급·장비 장애 예외 출입: 감독자 + 감리(또는 발주처) 이중 서명 (Q5)
+    // ==================================================================
+
+    function _emergency(uint8 reason) internal returns (SafetyGate.EmergencyEntry memory) {
+        return SafetyGate.EmergencyEntry({
+            caseId: CASE_ID,
+            siteId: SITE_ID,
+            workerId: keccak256("worker-9"),
+            reasonCode: reason,
+            nonce: _nonce(),
+            timestamp: uint64(block.timestamp)
+        });
+    }
+
+    function _signEmergency(SafetyGate.EmergencyEntry memory e, uint256 pk) internal view returns (bytes memory) {
+        return _sign(
+            pk,
+            keccak256(
+                abi.encode(EMERGENCY_TYPEHASH, e.caseId, e.siteId, e.workerId, e.reasonCode, e.nonce, e.timestamp)
+            )
+        );
+    }
+
+    function test_emergency_supervisorAndInspector_recorded() public {
+        SafetyGate.EmergencyEntry memory e = _emergency(1); // 게이트 장비 장애
+        gate.submitEmergencyEntry(e, _signEmergency(e, supervisorPk), _signEmergency(e, inspectorPk));
+        SafetyGate.StoredEmergency memory s = gate.getEmergencyEntry(e.nonce);
+        assertEq(s.supervisor, supervisor);
+        assertEq(s.approver, inspector);
+        assertEq(s.anchoredAt, block.timestamp);
+        assertEq(gate.getSiteStats(SITE_ID).emergencies, 1);
+        assertEq(gate.getEmergencyEntries(SITE_ID, 0, 10).length, 1);
+    }
+
+    function test_emergency_ownerCanCoSign() public {
+        SafetyGate.EmergencyEntry memory e = _emergency(2);
+        gate.submitEmergencyEntry(e, _signEmergency(e, supervisorPk), _signEmergency(e, ownerPk));
+        assertEq(gate.getEmergencyEntry(e.nonce).approver, owner);
+    }
+
+    function test_emergency_supervisorAloneCannot() public {
+        // 감독자 혼자 두 번 서명해도 안 된다 (수동 승인만으로 안전 조건 우회 금지)
+        SafetyGate.EmergencyEntry memory e = _emergency(1);
+        bytes memory sup = _signEmergency(e, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, supervisor, gate.INSPECTOR_ROLE()));
+        gate.submitEmergencyEntry(e, sup, sup);
+    }
+
+    function test_emergency_reviewerCannotReplaceSupervisor() public {
+        SafetyGate.EmergencyEntry memory e = _emergency(1);
+        bytes memory insp = _signEmergency(e, inspectorPk);
+        bytes memory own = _signEmergency(e, ownerPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.MissingRole.selector, inspector, gate.SUPERVISOR_ROLE()));
+        gate.submitEmergencyEntry(e, insp, own);
+    }
+
+    function test_emergency_reasonRequired() public {
+        SafetyGate.EmergencyEntry memory e = _emergency(0);
+        bytes memory a = _signEmergency(e, supervisorPk);
+        bytes memory b = _signEmergency(e, inspectorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 0));
+        gate.submitEmergencyEntry(e, a, b);
+    }
+
+    function test_emergency_staleRejected() public {
+        SafetyGate.EmergencyEntry memory e = _emergency(1);
+        e.timestamp = uint64(block.timestamp - 1 hours - 1);
+        bytes memory a = _signEmergency(e, supervisorPk);
+        bytes memory b = _signEmergency(e, inspectorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, e.timestamp, uint64(block.timestamp))
+        );
+        gate.submitEmergencyEntry(e, a, b);
     }
 }

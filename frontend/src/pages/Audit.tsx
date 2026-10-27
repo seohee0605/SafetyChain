@@ -48,6 +48,17 @@ type Summary = {
 }
 
 type Reason = { code: number; label: string }
+type Rejection = { kind: string; nonce: string | null; error: string; at: number }
+
+const KIND_LABEL: Record<string, string> = { checkin: '출입 검사', override: '수동 처리', site_record: '위험성평가' }
+const ERROR_LABEL: Record<string, string> = {
+  StaleTimestamp: '허용 시간 밖의 서명 시각',
+  NonceAlreadyUsed: '이미 쓰인 출입 권한(QR) 재사용',
+  MissingRole: '등록되지 않았거나 해제된 서명자',
+  CheckInNotOverridable: '수동 처리할 수 없는 기록',
+  CheckInNotFailed: '불합격이 아닌 기록에 수동 처리',
+  DuplicateSequence: '같은 기기 일련번호 재사용',
+}
 type RelayMode = 'normal' | 'paused' | 'drop_failed'
 
 // 번호 띠 한 칸의 상태. 'gap'은 게이트도 체인도 모르는 번호 (게이트가 서명했지만 어디에도 전달되지 않음)
@@ -74,6 +85,7 @@ export default function Audit() {
   const [data, setData] = useState<Summary | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(true)
+  const [rejections, setRejections] = useState<Rejection[]>([])
 
   const load = useCallback(async (site: string) => {
     try {
@@ -82,6 +94,11 @@ export default function Audit() {
       setData(await res.json())
       setLoadedSite(site)
       setError(null)
+      // 거부 로그는 시공사 백엔드가 남기는 참고 자료라 실패해도 대조 화면은 그대로 보여준다
+      fetch(`${BACKEND_URL}/rejections/${encodeURIComponent(site)}`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then(setRejections)
+        .catch(() => setRejections([]))
     } catch (e) {
       setError(e instanceof Error && e.message.startsWith('감사') ? e.message : '감사 저장소에 연결할 수 없습니다. audit 서비스(8100)가 켜져 있는지 확인하세요')
     }
@@ -94,6 +111,7 @@ export default function Audit() {
     return () => clearInterval(id)
   }, [loadedSite, live, load])
 
+  const rejectedByNonce = new Map(rejections.filter((r) => r.nonce).map((r) => [r.nonce as string, r.error]))
   const problems = (data?.records.filter((r) => PROBLEM.includes(r.audit)) ?? []).sort((a, b) => a.deviceSeq - b.deviceSeq)
 
   return (
@@ -137,6 +155,11 @@ export default function Audit() {
                     <span className="flex-1 text-ink">
                       {r.passed ? '검사 통과' : '검사 불합격'}
                       <span className="text-ink-muted"> · 게이트 서명 {time(r.signedAt)}</span>
+                      {rejectedByNonce.has(r.nonce) && (
+                        <span className="block text-xs text-ink-muted">
+                          릴레이 기록상 체인이 거부함: {ERROR_LABEL[rejectedByNonce.get(r.nonce) as string] ?? rejectedByNonce.get(r.nonce)}
+                        </span>
+                      )}
                     </span>
                     <span className={`shrink-0 px-2 py-1 border-2 border-charcoal text-xs font-semibold ${CELL_STYLE[r.audit].cls}`}>
                       {CELL_STYLE[r.audit].label}
@@ -170,6 +193,30 @@ export default function Audit() {
                 ))}
               </div>
             )}
+          </Card>
+
+          <Card>
+            <div className="flex flex-wrap justify-between items-baseline gap-2">
+              <p className="font-display font-bold uppercase tracking-wide text-charcoal">체인이 거부한 제출</p>
+              <span className="text-xs text-ink-muted">시공사 백엔드 로그 · 참고용</span>
+            </div>
+            {rejections.length === 0 ? (
+              <p className="text-sm text-ink-muted">거부된 제출이 없습니다.</p>
+            ) : (
+              <div className="divide-y-2 divide-charcoal/10">
+                {rejections.map((r, i) => (
+                  <div key={i} className="flex justify-between gap-3 py-2 text-sm">
+                    <span className="text-ink">
+                      {KIND_LABEL[r.kind] ?? r.kind} · {ERROR_LABEL[r.error] ?? r.error}
+                    </span>
+                    <span className="shrink-0 text-ink-muted text-xs">{new Date(r.at * 1000).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-ink-muted">
+              거부된 트랜잭션은 블록체인에 흔적이 남지 않아 릴레이가 받은 거부 응답을 따로 기록합니다. 누락 판정의 기준은 위의 감사 저장소 대조입니다.
+            </p>
           </Card>
 
           <DemoTools onChanged={() => loadedSite && load(loadedSite)} />

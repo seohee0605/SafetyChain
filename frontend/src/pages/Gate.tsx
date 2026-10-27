@@ -5,7 +5,7 @@ import { Card, ChainLink, ErrorText, Input, PageTitle, SecondaryButton, Select, 
 import { BACKEND_URL } from '../config'
 
 type QrIssue = { nonce: string; expiresAt: number }
-type EntryStatus = 'Granted' | 'Denied' | 'HeldNoAssessment' | 'LateAuditOnly'
+type EntryStatus = 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly'
 type GateResult = {
   anchored: boolean
   txHash: string | null
@@ -475,6 +475,11 @@ function ResultScreen(props: {
     icon = '‖'
     title = '출입 보류'
     message = '오늘 위험성평가가 아직 등록되지 않았습니다. 평가가 등록된 뒤 다시 검사받으세요. 출입 시도는 기록됐습니다'
+  } else if (done && result.entryStatus === 'HeldHazardsOpen') {
+    tone = 'bg-safety-orange text-white'
+    icon = '‖'
+    title = '출입 보류'
+    message = '오늘 위험성평가에 아직 조치되지 않은 위험요인이 있습니다. 조치 완료가 등록된 뒤 다시 검사받으세요. 출입 시도는 기록됐습니다'
   } else if (done && result.entryStatus === 'LateAuditOnly') {
     tone = 'bg-ink-muted text-white'
     icon = '⧗'

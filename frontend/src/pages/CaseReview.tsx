@@ -16,7 +16,7 @@ type CheckInRow = {
   timestamp: number
   overridden: boolean
   overrideReason: string | null
-  entryStatus: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'LateAuditOnly' | null
+  entryStatus: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly' | null
 }
 
 type SiteRecordRow = {
@@ -201,6 +201,8 @@ export default function CaseReview() {
                     <span className="text-ink-muted text-xs">{new Date(c.timestamp * 1000).toLocaleTimeString()} 출입 검사</span>
                     {c.entryStatus === 'HeldNoAssessment' ? (
                       <span className="text-safety-orange font-semibold">위험성평가 전 · 출입 보류</span>
+                    ) : c.entryStatus === 'HeldHazardsOpen' ? (
+                      <span className="text-safety-orange font-semibold">위험요인 미조치 · 출입 보류</span>
                     ) : c.entryStatus === 'LateAuditOnly' ? (
                       <span className="text-ink-muted font-semibold">지연 도착 · 감사용</span>
                     ) : (

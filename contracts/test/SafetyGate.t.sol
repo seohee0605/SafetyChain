@@ -803,7 +803,7 @@ contract SafetyGateTest is Test {
     function test_entry_assessmentHazardsNotControlled_held() public {
         _assess(false);
         bytes32 nonce = _submitCheckIn(true, true, true);
-        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldHazardsOpen));
     }
 
     function test_entry_assessmentThenPass_granted() public {
@@ -817,7 +817,7 @@ contract SafetyGateTest is Test {
         _assess(true);
         _assess(false); // 오후에 위험요인 미조치로 다시 제출
         bytes32 nonce = _submitCheckIn(true, true, true);
-        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldHazardsOpen));
     }
 
     function test_entry_assessmentOfOtherSite_doesNotCount() public {
@@ -985,5 +985,40 @@ contract SafetyGateTest is Test {
         bytes memory sig2 = _signCheckIn(c2, devicePk);
         vm.expectRevert(abi.encodeWithSelector(SafetyGate.NonceAlreadyUsed.selector, nonce));
         gate.submitCheckIn(c2, sig2);
+    }
+
+    // ==================================================================
+    // 11. 보류 사유 구분: 평가 없음 vs 위험요인 미조치 (3회차 리뷰 보완)
+    // ==================================================================
+
+    function test_held_reasonsAreDistinguished_andBothCountedAsHeld() public {
+        bytes32 noAssessment = _submitCheckIn(true, true, true);
+        _assess(false);
+        bytes32 hazardsOpen = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(noAssessment)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+        assertEq(uint8(_status(hazardsOpen)), uint8(SafetyGate.EntryStatus.HeldHazardsOpen));
+        assertEq(gate.getSiteStats(SITE_ID).held, 2);
+        assertFalse(gate.isEntryAllowed(hazardsOpen));
+    }
+
+    function test_override_cannotBypassOpenHazards() public {
+        _assess(false);
+        bytes32 nonce = _submitCheckIn(false, true, true); // 위험요인 미조치 + 보호구 불합격
+        SafetyGate.Override memory o = _override(nonce, 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafetyGate.CheckInNotOverridable.selector, nonce, SafetyGate.EntryStatus.HeldHazardsOpen
+            )
+        );
+        gate.submitOverride(o, sig);
+    }
+
+    function test_entry_yesterdaysHazardsOpenAssessment_isNoAssessmentToday() public {
+        // 어제 평가는 오늘 기준으로는 '평가 없음'
+        _assess(false);
+        vm.warp(block.timestamp + 1 days);
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
     }
 }

@@ -124,12 +124,13 @@ contract SafetyGate is AccessControl, EIP712 {
     // 저장 구조체
     // ------------------------------------------------------------------
 
-    /// @notice 출입 검사 기록의 출입 판정. 우선순위: 지연 > 평가 전 보류 > 불합격 > 허가.
+    /// @notice 출입 검사 기록의 출입 판정. 우선순위: 지연 > 평가 없음 > 위험요인 미조치 > 불합격 > 허가.
     enum EntryStatus {
         Granted, // 당일 위험성평가 완료 + 보호구·음주 합격 + 제시간 제출
         Denied, // 보호구 또는 음주 불합격 (보호구는 감독자 Override 가능)
-        HeldNoAssessment, // 당일 위험성평가 없음 또는 위험요인 미조치 → 출입 보류, 시도 사실은 남김
-        LateAuditOnly // 늦게 도착한 기록 → 검사 사실은 남기되 출입 근거로 쓰지 않음
+        HeldNoAssessment, // 당일 이 현장의 위험성평가가 체인에 없음 → 출입 보류, 시도 사실은 남김
+        LateAuditOnly, // 늦게 도착한 기록 → 검사 사실은 남기되 출입 근거로 쓰지 않음
+        HeldHazardsOpen // 당일 평가는 있지만 위험요인이 미조치 → 출입 보류
     }
 
     struct StoredCheckIn {
@@ -397,7 +398,7 @@ contract SafetyGate is AccessControl, EIP712 {
         SiteStats storage st = _siteStats[c.siteId];
         st.checkIns += 1;
         if (!allPassed) st.failed += 1;
-        if (status == EntryStatus.HeldNoAssessment) st.held += 1;
+        if (status == EntryStatus.HeldNoAssessment || status == EntryStatus.HeldHazardsOpen) st.held += 1;
         if (status == EntryStatus.LateAuditOnly) st.late += 1;
 
         emit CheckInRecorded(c.siteId, c.workerId, c.nonce, allPassed, status, device, c.deviceSeq);
@@ -651,14 +652,12 @@ contract SafetyGate is AccessControl, EIP712 {
     function _entryStatus(CheckIn calldata c, bool onTime, bool allPassed) private view returns (EntryStatus) {
         if (!onTime) return EntryStatus.LateAuditOnly;
         Assessment storage a = _assessments[c.caseId];
-        // 출입 허가 조건 ①: 당일(KST) 이 현장에 위험요인 조치가 끝난 위험성평가가 체인에 있어야 한다.
+        // 출입 허가 조건 ①: 당일(KST) 이 현장의 위험성평가가 체인에 있고, 위험요인 조치가 끝났어야 한다.
         // caseId는 게이트가 넣는 값이라, 어제 caseId를 재사용하지 못하도록 평가의 블록 시각 날짜까지 확인한다.
-        if (
-            a.anchoredAt == 0 || a.siteId != c.siteId || !a.hazardsControlled
-                || _dayOf(a.anchoredAt) != _dayOf(block.timestamp)
-        ) {
+        if (a.anchoredAt == 0 || a.siteId != c.siteId || _dayOf(a.anchoredAt) != _dayOf(block.timestamp)) {
             return EntryStatus.HeldNoAssessment;
         }
+        if (!a.hazardsControlled) return EntryStatus.HeldHazardsOpen;
         // 출입 허가 조건 ②: 안전검사 통과. (조건 ③ 출입 권한 1회 사용은 submitCheckIn 첫 줄 _consumeNonce가 보장)
         return allPassed ? EntryStatus.Granted : EntryStatus.Denied;
     }

@@ -127,7 +127,7 @@ ACTION_SUBMIT, ACTION_APPROVE, ACTION_REJECT = 1, 2, 3
 CASE_STATUS = ["None", "Submitted", "InspectorApproved", "Finalized", "Rejected"]
 ACTION_NAMES = {1: "submit", 2: "approve", 3: "reject"}
 # 컨트랙트 EntryStatus enum 순서와 같아야 한다
-ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly"]
+ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly", "HeldHazardsOpen"]
 ROLE_IDS = {
     "device": Web3.keccak(text="GATE_DEVICE_ROLE"),
     "supervisor": Web3.keccak(text="SUPERVISOR_ROLE"),

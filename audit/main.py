@@ -59,7 +59,7 @@ contract = w3.eth.contract(
 )
 GATE_DEVICE_ROLE = Web3.keccak(text="GATE_DEVICE_ROLE")
 ROLE_NAMES = {GATE_DEVICE_ROLE: "device", Web3.keccak(text="SUPERVISOR_ROLE"): "supervisor"}
-ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly"]
+ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly", "HeldHazardsOpen"]
 REVOKE_REASONS = {1: "키 유출 의심", 2: "기기 고장·교체", 3: "현장 철수"}
 
 CHECKIN_FIELDS = [

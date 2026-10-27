@@ -146,10 +146,11 @@ def worker_records(site: str, worker: str):
     out = []
     for c in db.list_checkins_by_worker(worker, site):
         overridden = db.get_override_for_checkin(c["nonce"]) is not None
+        passed = bool(c["helmet_pass"] and c["shoes_pass"] and c["alcohol_pass"])
         out.append({
             "nonce": c["nonce"],
             "at": c["timestamp"],
-            "result": _worker_result(c["entry_status"], overridden),
+            "result": _worker_result(c["entry_status"], overridden, passed),
             "helmetPass": bool(c["helmet_pass"]),
             "shoesPass": bool(c["shoes_pass"]),
             "alcoholPass": bool(c["alcohol_pass"]),
@@ -158,13 +159,17 @@ def worker_records(site: str, worker: str):
     return out
 
 
-def _worker_result(entry_status: str | None, overridden: bool) -> str:
+def _worker_result(entry_status: str | None, overridden: bool, passed: bool) -> str:
     if entry_status == "Granted":
         return "pass"
     if entry_status == "HeldNoAssessment":
         return "held"
+    if entry_status == "HeldHazardsOpen":
+        return "hazards"
     if entry_status == "LateAuditOnly":
         return "late"
+    if entry_status is None and passed:
+        return "pass"  # 출입 상태를 저장하기 전(이전 버전)에 남은 기록은 검사 결과로 판정
     return "override" if overridden else "fail"
 
 
@@ -368,7 +373,7 @@ def gate_override(req: OverrideRequest):
     try:
         tx_hash = chain.submit_override(signed["override"], signed["signature"])
     except ONCHAIN_ERRORS as e:
-        db.record_rejection("override", req.nonce, None, chain.describe_error(e))
+        db.record_rejection("override", req.nonce, db.get_checkin(req.nonce)["site_id"], chain.describe_error(e))
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
 
     db.record_override(
@@ -420,7 +425,7 @@ def dashboard(site: str):
             d["failed"] += 1
         if c["overridden"]:
             d["overrides"] += 1
-        if c["status"] == "HeldNoAssessment":
+        if c["status"] in ("HeldNoAssessment", "HeldHazardsOpen"):
             d["held"] += 1
         elif c["status"] == "LateAuditOnly":
             d["late"] += 1
@@ -936,3 +941,14 @@ def set_relay_mode(req: RelayModeRequest):
         raise HTTPException(400, f"mode must be one of {RELAY_MODES}")
     db.set_setting("relay_mode", req.mode)
     return {"mode": req.mode}
+
+
+@app.get("/rejections/{site}")
+def list_rejections(site: str):
+    """체인이 거부한 제출 로그 (위조 서명·nonce 재사용·시간 초과·역할 없음 등).
+    거부된 트랜잭션은 체인에 흔적이 남지 않아서, 릴레이가 받은 거부 응답을 여기에 남겨 감리가 볼 수 있게 한다.
+    이 로그는 시공사 백엔드가 쓰는 것이라 신뢰 기준이 아니라 참고용이다 (누락 판정은 감사 저장소 ↔ 체인 대조가 기준)."""
+    return [
+        {"kind": r["kind"], "nonce": r["nonce"], "error": r["error"], "at": r["at"]}
+        for r in db.list_rejections(site)
+    ]

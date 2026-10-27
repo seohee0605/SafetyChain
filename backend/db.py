@@ -479,3 +479,10 @@ def last_incident_date(site_id: str) -> str | None:
             "SELECT MAX(incident_date) AS d FROM incidents WHERE site_id = ?", (site_id,)
         ).fetchone()
     return row["d"] if row else None
+
+
+def list_rejections(site_id: str, limit: int = 50) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM rejected_submissions WHERE site_id = ? ORDER BY at DESC LIMIT ?", (site_id, limit)
+        ).fetchall()

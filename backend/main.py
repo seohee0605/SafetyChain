@@ -5,17 +5,19 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import urllib.error
+import urllib.request
+
+from Crypto.Cipher import AES
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from web3.exceptions import ContractCustomError, ContractLogicError
 
 import chain
 import config
 import db
-import gate_device
-import vision
 
 app = FastAPI(title="SafetyChain Backend")
 
@@ -42,6 +44,11 @@ REJECT_REASONS = {
     3: "증빙(사진·원문) 불일치",
     4: "재검사 요구",
     5: "수동 처리(override) 사유 부적절",
+}
+EMERGENCY_REASONS = {
+    1: "게이트 장비 장애",
+    2: "응급·구조 대응",
+    3: "정전·통신 장애",
 }
 REVOKE_REASONS = {
     1: "키 유출 의심",
@@ -79,6 +86,7 @@ def reasons():
         "override": [{"code": k, "label": v} for k, v in OVERRIDE_REASONS.items()],
         "reject": [{"code": k, "label": v} for k, v in REJECT_REASONS.items()],
         "revoke": [{"code": k, "label": v} for k, v in REVOKE_REASONS.items()],
+        "emergency": [{"code": k, "label": v} for k, v in EMERGENCY_REASONS.items()],
     }
 
 
@@ -168,185 +176,162 @@ def _worker_result(entry_status: str | None, overridden: bool, passed: bool) -> 
         return "hazards"
     if entry_status == "LateAuditOnly":
         return "late"
+    if entry_status == "SuspectTimestamp":
+        return "suspect"
     if entry_status is None and passed:
         return "pass"  # 출입 상태를 저장하기 전(이전 버전)에 남은 기록은 검사 결과로 판정
     return "override" if overridden else "fail"
 
 
-class GateError(Exception):
-    pass
-
-
-def _check_gate_request(nonce: str, workerId: str, siteId: str) -> bytes:
+def _check_gate_request(nonce: str, workerId: str, siteId: str):
     nonce_row = db.get_nonce(nonce)
     if nonce_row is None:
         raise HTTPException(404, "nonce not found")
     if nonce_row["consumed"]:
         raise HTTPException(400, "nonce already used")
-    if nonce_row["expires_at"] < int(time.time()):
-        raise HTTPException(400, "nonce expired")
     # 다른 사람 QR로 체크인 못하게
     if nonce_row["worker_id"] != workerId or nonce_row["site_id"] != siteId:
         raise HTTPException(400, "QR was issued for a different worker/site")
-    return _parse_nonce(nonce)
+    return nonce_row
 
 
-def _gate_steps(nonce, nonce_bytes, image_bytes, image_name, alcohol_pass, worker_id, site_id, work_date,
-               signed_minutes_ago=0):
-    """검사 -> 기기 서명 -> 감사 저장소 전달 -> 온체인 기록 -> 확정. 단계가 끝날 때마다 상태를 내보낸다.
-    판정 결과는 온체인 확정 뒤에만 나간다 (Gatekeeper). 출입 허가 여부는 컨트랙트가 정한 EntryStatus를 따른다."""
-    yield {"stage": "inspecting"}
-    image_path = UPLOAD_DIR / f"{nonce_bytes.hex()}_{Path(image_name or 'capture.jpg').name}"
-    image_path.write_bytes(image_bytes)
-    evidence_bytes = chain.evidence_hash(image_bytes)
-    ppe = vision.check_ppe(str(image_path))
+class GatePrepareRequest(BaseModel):
+    nonce: str
+    workerId: str
+    siteId: str
+    workDate: str | None = None
+    signedMinutesAgo: int = 0  # 시연: 오프라인 상태에서 N분 전에 검사한 기록
 
-    yield {"stage": "signing"}
-    case_id_bytes = chain.case_id_hash(site_id, work_date)
-    worker_id_bytes = chain.worker_id_hash(worker_id, site_id, work_date)
-    model_hash_bytes = vision.get_model_hash()
-    device_seq = gate_device.next_seq()
-    signed = chain.build_and_sign_checkin(
-        case_id=case_id_bytes,
-        worker_id=worker_id_bytes,
-        site_id=chain.site_id_hash(site_id),
-        helmet_pass=ppe["helmetPass"],
-        shoes_pass=ppe["shoesPass"],
-        alcohol_pass=alcohol_pass,
-        model_hash=model_hash_bytes,
-        evidence=evidence_bytes,
-        nonce=nonce_bytes,
-        device_seq=device_seq,
-        # 시연: 오프체인 상태에서 N분 전에 서명해 둔 기록을 지금 재전송하는 상황
-        signed_at=int(time.time()) - signed_minutes_ago * 60 if signed_minutes_ago else None,
-    )
 
-    # 게이트가 체인 제출 전에 감리 감사 저장소로 원본 사본을 먼저 보낸다 (시공사 릴레이와 독립된 경로)
-    yield {"stage": "auditing"}
-    audit_delivered = gate_device.send_to_audit(signed["checkin"], signed["signature"])
-
-    all_passed = ppe["helmetPass"] and ppe["shoesPass"] and alcohol_pass
-    base_result = {
-        "nonce": nonce,
-        "deviceSeq": device_seq,
-        "auditDelivered": audit_delivered,
-        "helmetPass": ppe["helmetPass"],
-        "shoesPass": ppe["shoesPass"],
-        "alcoholPass": alcohol_pass,
-        "verdict": all_passed,
+@app.post("/gate/prepare")
+def gate_prepare(req: GatePrepareRequest):
+    """게이트 서비스가 서명하기 전에 묻는다: 이 QR이 이 근로자·현장 것이고 아직 유효한가.
+    서명에 들어갈 가명(workerId)·caseId·QR 발급/만료 시각을 돌려준다 (가명 HMAC 키는 시공사만 갖는다)."""
+    _parse_nonce(req.nonce)
+    row = _check_gate_request(req.nonce, req.workerId, req.siteId)
+    issued, expires = row["issued_at"], row["expires_at"]
+    if req.signedMinutesAgo:
+        _require_demo_controls()
+        # 시연: 그때 발급된 QR로 그때 검사한 것처럼 QR 유효기간도 같이 옮긴다
+        shift = req.signedMinutesAgo * 60
+        issued, expires = issued - shift, expires - shift
+    elif expires < int(time.time()):
+        raise HTTPException(400, "nonce expired")
+    work_date = req.workDate or _default_work_date()
+    return {
+        "caseId": chain.to_hex0x(chain.case_id_hash(req.siteId, work_date)),
+        "workerId": chain.to_hex0x(chain.worker_id_hash(req.workerId, req.siteId, work_date)),
+        "siteId": chain.to_hex0x(chain.site_id_hash(req.siteId)),
+        "qrIssuedAt": issued,
+        "qrExpiresAt": expires,
     }
+
+
+def _encrypt_photo(image_bytes: bytes) -> bytes:
+    cipher = AES.new(config.PHOTO_KEY, AES.MODE_GCM)
+    ciphertext, tag = cipher.encrypt_and_digest(image_bytes)
+    return cipher.nonce + tag + ciphertext
+
+
+def _decrypt_photo(blob: bytes) -> bytes:
+    cipher = AES.new(config.PHOTO_KEY, AES.MODE_GCM, nonce=blob[:16])
+    return cipher.decrypt_and_verify(blob[32:], blob[16:32])
+
+
+def _read_photo(path: str | None) -> bytes | None:
+    if not path or not Path(path).exists():
+        return None
+    blob = Path(path).read_bytes()
+    if path.endswith(".enc"):
+        try:
+            return _decrypt_photo(blob)
+        except ValueError:
+            return None  # 키가 다르거나 파일이 바뀜
+    return blob  # 암호화 도입 전 사진
+
+
+@app.post("/gate/relay")
+def gate_relay(checkin: str = Form(...), signature: str = Form(...), image: UploadFile = File(...)):
+    """시공사 릴레이: 게이트 서비스가 서명한 기록을 체인에 제출하고(가스는 시공사), 원본을 보관한다.
+    시공사는 서명을 만들 수 없고 내용을 바꾸면 서명이 깨진다. 할 수 있는 건 '안 내는 것'뿐인데,
+    그건 게이트가 먼저 보낸 감사 저장소 원본과 체인을 대조하면 드러난다."""
+    try:
+        c = json.loads(checkin)
+        fields = [f["name"] for f in chain.CHECKIN_TYPES["CheckIn"]]
+        msg = {
+            k: (chain.from_hex0x(c[k]) if t["type"] == "bytes32" else (bool(c[k]) if t["type"] == "bool" else int(c[k])))
+            for k, t in zip(fields, chain.CHECKIN_TYPES["CheckIn"])
+        }
+        sig = chain.from_hex0x(signature)
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(400, f"invalid checkin payload: {e}")
+    nonce = chain.to_hex0x(msg["nonce"])
+    row = db.get_nonce(nonce)
+    if row is None:
+        raise HTTPException(404, "nonce not found")
+    if row["consumed"]:
+        raise HTTPException(400, "nonce already used")
+    image_bytes = image.file.read()
+    if chain.evidence_hash(image_bytes) != msg["evidenceHash"]:
+        raise HTTPException(400, "image does not match signed evidenceHash")
+
+    site_id = row["site_id"]
+    all_passed = msg["helmetPass"] and msg["shoesPass"] and msg["alcoholPass"]
+    base = {"nonce": nonce, "helmetPass": msg["helmetPass"], "shoesPass": msg["shoesPass"],
+            "alcoholPass": msg["alcoholPass"], "verdict": all_passed}
 
     # 시연: 시공사가 릴레이를 멈추거나 불합격 기록만 빼는 상황. 시공사 DB에도 안 남기고 체인에도 안 낸다
     relay_mode = db.get_setting("relay_mode", "normal") if config.DEMO_CONTROLS else "normal"
     if relay_mode == "paused" or (relay_mode == "drop_failed" and not all_passed):
         db.consume_nonce(nonce)
-        yield {
-            "stage": "not_anchored",
-            "result": {**base_result, "anchored": False, "txHash": None, "entryStatus": None,
-                       "entryAllowed": False, "overridable": False},
-        }
-        return
+        return {**base, "anchored": False, "txHash": None, "entryStatus": None, "entryAllowed": False,
+                "overridable": False}
 
-    yield {"stage": "anchoring"}
     try:
-        tx_hash = chain.submit_checkin(signed["checkin"], signed["signature"])
+        tx_hash = chain.submit_checkin(msg, sig)
     except ONCHAIN_ERRORS as e:
         db.record_rejection("checkin", nonce, site_id, chain.describe_error(e))
-        raise GateError(f"on-chain submission rejected: {chain.describe_error(e)}") from e
+        raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
 
-    onchain = chain.get_onchain_checkin(nonce_bytes)
+    onchain = chain.get_onchain_checkin(msg["nonce"])
     entry_status = onchain["status"] if onchain else None
     db.consume_nonce(nonce)
+    # 사진에는 얼굴이 찍히므로 암호화해서 보관한다 (해시는 원본 기준이라 검증은 복호화 후 비교)
+    image_path = UPLOAD_DIR / f"{msg['nonce'].hex()}.jpg.enc"
+    image_path.write_bytes(_encrypt_photo(image_bytes))
     db.record_checkin(
         nonce=nonce,
-        case_id=chain.to_hex0x(case_id_bytes),
+        case_id=chain.to_hex0x(msg["caseId"]),
         site_id=site_id,
-        worker_id_hash=chain.to_hex0x(worker_id_bytes),
+        worker_id_hash=chain.to_hex0x(msg["workerId"]),
         tx_hash=tx_hash,
-        helmet_pass=ppe["helmetPass"],
-        shoes_pass=ppe["shoesPass"],
-        alcohol_pass=alcohol_pass,
-        model_hash=chain.to_hex0x(model_hash_bytes),
-        device_address=chain.DEVICE_ADDRESS,
-        signature=chain.to_hex0x(signed["signature"]),
-        timestamp=signed["checkin"]["timestamp"],
-        evidence_hash=chain.to_hex0x(evidence_bytes),
+        helmet_pass=msg["helmetPass"],
+        shoes_pass=msg["shoesPass"],
+        alcohol_pass=msg["alcoholPass"],
+        model_hash=chain.to_hex0x(msg["modelHash"]),
+        device_address=onchain["device"] if onchain else "",
+        signature=signature,
+        timestamp=msg["timestamp"],
+        evidence_hash=chain.to_hex0x(msg["evidenceHash"]),
         image_path=str(image_path),
         entry_status=entry_status,
-        device_seq=device_seq,
+        device_seq=msg["deviceSeq"],
     )
-
-    yield {
-        "stage": "confirmed",
-        "result": {
-            **base_result,
-            "anchored": True,
-            "txHash": tx_hash,
-            "entryStatus": entry_status,
-            "entryAllowed": entry_status == "Granted",
-            # 수동 처리는 '보호구 불합격(Denied)'에만. 음주 불합격·평가 전 보류·지연 도착은 불가
-            "overridable": entry_status == "Denied" and alcohol_pass,
-        },
+    return {
+        **base,
+        "anchored": True,
+        "txHash": tx_hash,
+        "entryStatus": entry_status,
+        "entryAllowed": entry_status == "Granted",
+        # 수동 처리는 '보호구 불합격(Denied)'에만. 음주 불합격·보류·지연·의심은 불가
+        "overridable": entry_status == "Denied" and msg["alcoholPass"],
     }
 
 
-def _check_delay(signed_minutes_ago: int) -> None:
-    if signed_minutes_ago == 0:
-        return
-    _require_demo_controls()
-    if not 0 < signed_minutes_ago <= 48 * 60:
-        raise HTTPException(400, "signedMinutesAgo must be between 1 and 2880")
-
-
-@app.post("/gate/check")
-def gate_check(
-    image: UploadFile = File(...),
-    nonce: str = Form(...),
-    alcoholPass: bool = Form(...),
-    workerId: str = Form(...),
-    siteId: str = Form(...),
-    workDate: str = Form(None),
-    signedMinutesAgo: int = Form(0),
-):
-    nonce_bytes = _check_gate_request(nonce, workerId, siteId)
-    _check_delay(signedMinutesAgo)
-    steps = _gate_steps(nonce, nonce_bytes, image.file.read(), image.filename, alcoholPass, workerId, siteId,
-                        workDate or _default_work_date(), signedMinutesAgo)
-    try:
-        for step in steps:
-            if step["stage"] in ("confirmed", "not_anchored"):
-                return step["result"]
-    except GateError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.post("/gate/check/stream")
-def gate_check_stream(
-    image: UploadFile = File(...),
-    nonce: str = Form(...),
-    alcoholPass: bool = Form(...),
-    workerId: str = Form(...),
-    siteId: str = Form(...),
-    workDate: str = Form(None),
-    signedMinutesAgo: int = Form(0),
-):
-    """/gate/check과 같은데 단계마다 한 줄씩(NDJSON) 보내서 키오스크가 진행 상황을 보여줄 수 있게 한다."""
-    nonce_bytes = _check_gate_request(nonce, workerId, siteId)
-    _check_delay(signedMinutesAgo)
-    image_bytes = image.file.read()  # 응답 스트리밍 전에 읽어둔다
-    steps = _gate_steps(nonce, nonce_bytes, image_bytes, image.filename, alcoholPass, workerId, siteId,
-                        workDate or _default_work_date(), signedMinutesAgo)
-
-    def lines():
-        try:
-            for step in steps:
-                yield json.dumps(step, ensure_ascii=False) + "\n"
-        except GateError as e:
-            yield json.dumps({"stage": "error", "detail": str(e)}, ensure_ascii=False) + "\n"
-        except Exception as e:  # noqa: BLE001 - 키오스크에 실패를 알려야 함
-            yield json.dumps({"stage": "error", "detail": f"server error: {e}"}, ensure_ascii=False) + "\n"
-
-    return StreamingResponse(lines(), media_type="application/x-ndjson")
+@app.get("/gate/records/{site}")
+def gate_records(site: str):
+    """시공사 DB에 남은 게이트 기록 목록 (nonce·기기 일련번호만). 감사 저장소가 3자 대조에 쓴다."""
+    return [{"nonce": c["nonce"], "deviceSeq": c["device_seq"]} for c in db.list_checkins_by_site(site)]
 
 
 class OverrideRequest(BaseModel):
@@ -395,6 +380,14 @@ def gate_override(req: OverrideRequest):
 KST = ZoneInfo("Asia/Seoul")
 
 
+def _gate_model_hash() -> bytes | None:
+    try:
+        with urllib.request.urlopen(f"{config.GATE_URL}/model", timeout=5) as res:
+            return chain.from_hex0x(json.loads(res.read())["modelHash"])
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError):
+        return None
+
+
 def _kst_day(ts: int) -> str:
     return datetime.fromtimestamp(ts, KST).date().isoformat()
 
@@ -427,7 +420,7 @@ def dashboard(site: str):
             d["overrides"] += 1
         if c["status"] in ("HeldNoAssessment", "HeldHazardsOpen"):
             d["held"] += 1
-        elif c["status"] == "LateAuditOnly":
+        elif c["status"] in ("LateAuditOnly", "SuspectTimestamp"):
             d["late"] += 1
     week_start = int(datetime.combine(today - timedelta(days=6), datetime.min.time(), KST).timestamp())
     for ts in db.unchecked_expiry_times(site, week_start):
@@ -458,6 +451,8 @@ def dashboard(site: str):
         # 검사 건수에 포함되지만 출입 근거가 아닌 기록 (온체인 집계)
         "heldCount": stats["held"],
         "lateCount": stats["late"],
+        "suspectCount": stats["suspect"],
+        "emergencyCount": stats["emergencies"],
         "noIncidentDays": no_incident_days,
         "noIncidentSince": since,
         "lastIncidentDate": last_incident,
@@ -514,12 +509,11 @@ def verify(nonce: str):
     )
 
     # 3) 사진 원본이 바뀌지 않았는가
-    evidence_intact = False
-    if record["image_path"] and Path(record["image_path"]).exists():
-        evidence_intact = chain.evidence_hash(Path(record["image_path"]).read_bytes()) == data["evidenceHash"]
+    photo = _read_photo(record["image_path"])
+    evidence_intact = photo is not None and chain.evidence_hash(photo) == data["evidenceHash"]
 
-    # 4) 지금 서버의 AI 모델이 판정 당시 모델과 같은가
-    model_hash_match = data["modelHash"] == vision.get_model_hash()
+    # 4) 지금 게이트의 AI 모델이 판정 당시 모델과 같은가 (게이트 서비스에 묻는다)
+    model_hash_match = _gate_model_hash() == data["modelHash"]
 
     return {
         "onchain": True,
@@ -710,6 +704,7 @@ def _case_scope(case_id_hex: str) -> dict:
         "siteRecordNonces": sorted(r["nonce"] for r in db.list_site_records_by_case(case_id_hex)),
         "checkinNonces": sorted(c["nonce"] for c in db.list_checkins_by_case(case_id_hex)),
         "overrideNonces": sorted(o["nonce"] for o in db.list_overrides_by_case(case_id_hex)),
+        "emergencyNonces": sorted(e["nonce"] for e in db.list_emergencies_by_case(case_id_hex)),
     }
 
 
@@ -726,6 +721,12 @@ def get_case(site: str, workDate: str):
         "caseId": case_id_hex,
         "siteRecords": [_serialize_site_record_row(r) for r in db.list_site_records_by_case(case_id_hex)],
         "checkIns": [_serialize_checkin_row(c) for c in db.list_checkins_by_case(case_id_hex)],
+        "emergencies": [
+            {"nonce": e["nonce"], "reason": EMERGENCY_REASONS.get(e["reason_code"]), "timestamp": e["timestamp"],
+             "supervisor": chain.name_for_address(e["supervisor_address"]) or e["supervisor_address"],
+             "approver": chain.name_for_address(e["approver_address"]) or e["approver_address"]}
+            for e in db.list_emergencies_by_case(case_id_hex)
+        ],
         "state": chain.get_case_state(case_id),
         "history": [
             {**h, "reason": REJECT_REASONS.get(h["reasonCode"]) if h["action"] == "reject" else None}
@@ -829,7 +830,8 @@ def verify_case(site: str, workDate: str):
     scope_intact = chain.to_hex0x(chain.hash_text(submission["scope_json"])) == state["scopeHash"]
     try:
         submitted = json.loads(submission["scope_json"])
-        submitted = {k: submitted[k] for k in ("siteRecordNonces", "checkinNonces", "overrideNonces")}
+        submitted = {k: submitted.get(k, []) for k in ("siteRecordNonces", "checkinNonces", "overrideNonces",
+                                                         "emergencyNonces")}
     except (ValueError, KeyError, TypeError):
         return {"status": state["status"], "round": state["round"], "scopeIntact": False,
                 "recordsPresent": False, "addedAfterSubmit": 0}
@@ -845,6 +847,7 @@ def verify_case(site: str, workDate: str):
         all(on_chain(chain.get_onchain_site_record, n) for n in submitted["siteRecordNonces"])
         and all(on_chain(chain.get_onchain_checkin, n) for n in submitted["checkinNonces"])
         and all(on_chain(chain.is_nonce_used, n) for n in submitted["overrideNonces"])
+        and all(on_chain(chain.is_nonce_used, n) for n in submitted["emergencyNonces"])
     )
     current = _case_scope(case_id_hex)
 
@@ -952,3 +955,115 @@ def list_rejections(site: str):
         {"kind": r["kind"], "nonce": r["nonce"], "error": r["error"], "at": r["at"]}
         for r in db.list_rejections(site)
     ]
+
+
+# ======================================================================
+# 긴급·장비 장애 예외 출입 (감독자 + 감리 또는 발주처 이중 서명)
+# ======================================================================
+
+
+class EmergencyRequest(BaseModel):
+    siteId: str
+    workerId: str
+    reasonCode: int
+    supervisorName: str
+    reviewer: str = "inspector"  # 함께 서명할 기관: inspector(감리) | owner(발주처)
+    workDate: str | None = None
+
+
+@app.post("/gate/emergency")
+def emergency_entry(req: EmergencyRequest):
+    """게이트 고장·응급 상황 등으로 정상 검사를 못 할 때의 별도 절차.
+    감독자 혼자서는 기록할 수 없고 감리(또는 발주처) 서명이 같이 있어야 체인이 받는다."""
+    if req.reasonCode not in EMERGENCY_REASONS:
+        raise HTTPException(400, "unknown reasonCode")
+    if req.supervisorName not in chain.ADMIN_NAMES:
+        raise HTTPException(400, "unknown supervisorName")
+    if req.reviewer not in ("inspector", "owner"):
+        raise HTTPException(400, "reviewer must be inspector or owner")
+    work_date = req.workDate or _default_work_date()
+    nonce = secrets.token_bytes(32)
+    try:
+        signed = chain.build_and_sign_emergency(
+            chain.case_id_hash(req.siteId, work_date), chain.site_id_hash(req.siteId),
+            chain.worker_id_hash(req.workerId, req.siteId, work_date), req.reasonCode, nonce,
+            req.supervisorName, req.reviewer,
+        )
+        tx_hash = chain.submit_emergency(signed["entry"], signed["supervisorSig"], signed["reviewerSig"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except ONCHAIN_ERRORS as e:
+        db.record_rejection("emergency", chain.to_hex0x(nonce), req.siteId, chain.describe_error(e))
+        raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
+    stored = chain.contract.functions.getEmergencyEntry(nonce).call()
+    db.record_emergency(
+        nonce=chain.to_hex0x(nonce), case_id=chain.to_hex0x(signed["entry"]["caseId"]), site_id=req.siteId,
+        worker_id=req.workerId, reason_code=req.reasonCode, supervisor_address=stored[1],
+        approver_address=stored[2], tx_hash=tx_hash, timestamp=signed["entry"]["timestamp"],
+    )
+    return {"txHash": tx_hash, "nonce": chain.to_hex0x(nonce), "reason": EMERGENCY_REASONS[req.reasonCode]}
+
+
+@app.get("/emergencies/{site}")
+def list_emergencies(site: str):
+    return [{**e, "reason": EMERGENCY_REASONS.get(e["reasonCode"])} for e in chain.get_emergencies(site)]
+
+
+# ======================================================================
+# 사고 조사용 열람 (조사 토큰 필요, 모든 열람은 로그로 남는다)
+# ======================================================================
+
+
+def _require_investigator(token: str | None, name: str | None = "-") -> str:
+    if not config.INVESTIGATOR_TOKEN:
+        raise HTTPException(403, "investigation access is disabled (set INVESTIGATOR_TOKEN)")
+    if not token or not secrets.compare_digest(token, config.INVESTIGATOR_TOKEN):
+        raise HTTPException(401, "invalid investigator token")
+    if not name or not name.strip():
+        raise HTTPException(400, "investigator name is required")
+    return name.strip()
+
+
+class IdentifyRequest(BaseModel):
+    nonce: str
+    reason: str
+    investigator: str  # 열람자 이름 (한글 가능해서 헤더가 아니라 본문으로 받는다)
+
+
+@app.post("/investigation/identify")
+def investigation_identify(req: IdentifyRequest, x_investigator_token: str | None = Header(None)):
+    """사고 조사 때만: 검사 기록(nonce)의 날짜별 가명을 실제 사번으로 되돌린다. 누가·언제·왜 봤는지 남긴다."""
+    who = _require_investigator(x_investigator_token, req.investigator)
+    if len(req.reason.strip()) < 5:
+        raise HTTPException(400, "reason is required")
+    record = db.get_checkin(req.nonce)
+    issued = db.get_nonce(req.nonce)
+    if record is None or issued is None:
+        raise HTTPException(404, "no check-in recorded for this nonce")
+    db.log_access("identify", req.nonce, who, req.reason.strip())
+    return {"workerId": issued["worker_id"], "siteId": issued["site_id"], "workerIdHash": record["worker_id_hash"]}
+
+
+@app.get("/investigation/evidence/{nonce}")
+def investigation_evidence(
+    nonce: str,
+    reason: str,
+    investigator: str,
+    x_investigator_token: str | None = Header(None),
+):
+    """사고 조사 때만: 암호화된 검사 사진을 복호화해서 내준다. 열람 기록이 남는다."""
+    who = _require_investigator(x_investigator_token, investigator)
+    if len(reason.strip()) < 5:
+        raise HTTPException(400, "reason is required")
+    record = db.get_checkin(nonce)
+    photo = _read_photo(record["image_path"]) if record else None
+    if photo is None:
+        raise HTTPException(404, "photo not found")
+    db.log_access("evidence", nonce, who, reason.strip())
+    return Response(content=photo, media_type="image/jpeg")
+
+
+@app.get("/investigation/access-log")
+def investigation_access_log(x_investigator_token: str | None = Header(None)):
+    _require_investigator(x_investigator_token)
+    return [dict(r) for r in db.list_access_log()]

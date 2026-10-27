@@ -10,8 +10,12 @@
     · 바꿔치기(replaced): 같은 기기·같은 일련번호인데 체인에는 다른 기록이 올라감
     · 불일치(mismatch): 같은 nonce인데 체인 값이 게이트 원본과 다름
     · 체인 전용(chainOnly): 체인엔 있는데 게이트가 이곳에 보내지 않은 기록
+- 세 번째로 시공사 DB 목록도 받아 대조한다 (감사 저장소 · 시공사 DB · 체인 3자 대조).
+    · 시공사 DB에도 없음: 시공사가 체인에도 안 내고 자기 기록에서도 지운 것
+    · 시공사 DB에만 있음: 게이트 원본도 체인 기록도 없는데 시공사 DB에만 있는 것 (DB 조작 의심)
 
-검증의 기준은 항상 체인 값이고, 이 저장소는 "게이트가 무엇을 서명했는가"의 독립 증거다.
+무결성 판단의 기준은 체인 값이고, 이 저장소는 "게이트가 무엇을 서명했는가"의 독립 증거다.
+시공사 DB는 누락을 찾는 비교 대상으로만 쓰고 신뢰 기준으로 쓰지 않는다.
 개인 지목을 피하기 위해 응답에 근로자 가명(workerId)은 내보내지 않는다.
 """
 
@@ -50,6 +54,8 @@ RPC_URL = os.environ.get("RPC_URL", "http://127.0.0.1:8545")
 CONTRACT_ADDRESS = os.environ["CONTRACT_ADDRESS"]
 # 게이트가 보낸 뒤 이 시간이 지나도 체인에 없으면 '미제출'로 판정 (그 전에는 '대기 중')
 GRACE_SECONDS = int(os.environ.get("AUDIT_GRACE_SECONDS", "300"))
+# 3자 대조용 시공사 백엔드 주소 (기록 목록만 읽는다)
+CONTRACTOR_URL = os.environ.get("CONTRACTOR_URL", "http://127.0.0.1:8000")
 DB_PATH = BASE / "audit.db"
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
@@ -59,7 +65,8 @@ contract = w3.eth.contract(
 )
 GATE_DEVICE_ROLE = Web3.keccak(text="GATE_DEVICE_ROLE")
 ROLE_NAMES = {GATE_DEVICE_ROLE: "device", Web3.keccak(text="SUPERVISOR_ROLE"): "supervisor"}
-ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly", "HeldHazardsOpen"]
+ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly", "HeldHazardsOpen", "SuspectTimestamp"]
+EMERGENCY_REASONS = {1: "게이트 장비 장애", 2: "응급·구조 대응", 3: "정전·통신 장애"}
 REVOKE_REASONS = {1: "키 유출 의심", 2: "기기 고장·교체", 3: "현장 철수"}
 
 CHECKIN_FIELDS = [
@@ -72,6 +79,8 @@ CHECKIN_FIELDS = [
     ("modelHash", "bytes32"),
     ("evidenceHash", "bytes32"),
     ("nonce", "bytes32"),
+    ("qrIssuedAt", "uint64"),
+    ("qrExpiresAt", "uint64"),
     ("deviceSeq", "uint64"),
     ("timestamp", "uint64"),
 ]
@@ -251,6 +260,29 @@ def _public_view(checkin: dict) -> dict:
     }
 
 
+def _contractor_nonces(site: str) -> set[str] | None:
+    """시공사 DB에 남은 게이트 기록 nonce 목록. 시공사 백엔드에 닿지 않으면 None (대조 불가)."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    try:
+        url = f"{CONTRACTOR_URL}/gate/records/{urllib.parse.quote(site)}"
+        with urllib.request.urlopen(url, timeout=5) as res:
+            return {r["nonce"] for r in json.loads(res.read())}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError):
+        return None
+
+
+def _emergencies(site_hash: bytes) -> list[dict]:
+    rows = contract.functions.getEmergencyEntries(site_hash, 0, 1000).call()
+    return [
+        {"nonce": _hex(data[4]), "reason": EMERGENCY_REASONS.get(data[3]), "supervisor": sup, "approver": appr,
+         "anchoredAt": at}
+        for data, sup, appr, at in rows
+    ]
+
+
 @app.get("/summary/{site}")
 def summary(site: str):
     site_hash = Web3.keccak(text=site)
@@ -264,6 +296,7 @@ def summary(site: str):
         conflict_rows = conn.execute("SELECT * FROM conflicts ORDER BY received_at DESC LIMIT 50").fetchall()
 
     chain_rows = _chain_checkins(site_hash)
+    contractor = _contractor_nonces(site)
     chain_by_nonce = {c["data"]["nonce"]: c for c in chain_rows}
     chain_by_seq = {(c["device"], c["data"]["deviceSeq"]): c for c in chain_rows}
 
@@ -290,6 +323,7 @@ def summary(site: str):
             "device": r["device"],
             "receivedAt": r["received_at"],
             "audit": status,
+            "inContractorDb": None if contractor is None else r["nonce"] in contractor,
             "anchoredAt": onchain["anchoredAt"] if onchain and status == "anchored" else None,
             "entryStatus": onchain["status"] if onchain and status == "anchored" else None,
         })
@@ -299,6 +333,17 @@ def summary(site: str):
         for c in chain_rows
         if c["data"]["nonce"] not in audit_nonces
     ]
+
+    chain_nonces = set(chain_by_nonce)
+    contractor_counts = None
+    if contractor is not None:
+        contractor_counts = {
+            # 게이트 원본은 있는데 시공사 DB에도 체인에도 없음 = 시공사가 기록을 통째로 감춤
+            "hidden": sum(1 for r in records if r["inContractorDb"] is False and r["audit"] in ("missing", "pending")),
+            # 시공사 DB에만 있음 (게이트 원본·체인 둘 다 없음)
+            "contractorOnly": len(contractor - audit_nonces - chain_nonces),
+            "total": len(contractor),
+        }
 
     devices = []
     for addr in sorted({r["device"] for r in audit_rows} | {c["device"] for c in chain_rows}):
@@ -332,6 +377,8 @@ def summary(site: str):
         "site": site,
         "graceSeconds": GRACE_SECONDS,
         "counts": {**counts, "chainOnly": len(chain_only), "auditTotal": len(audit_rows), "chainTotal": len(chain_rows)},
+        "contractor": contractor_counts,
+        "emergencies": _emergencies(site_hash),
         "records": records[:200],
         "chainOnly": chain_only[:50],
         "devices": devices,

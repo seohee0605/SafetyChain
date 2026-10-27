@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+web3
+eth-account
+ultralytics
+python-multipart

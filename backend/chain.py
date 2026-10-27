@@ -31,8 +31,8 @@ contract = w3.eth.contract(
 )
 
 _sender_account = Account.from_key(config.SENDER_PRIVATE_KEY)
-_device_account = Account.from_key(config.DEVICE_PRIVATE_KEY)
-DEVICE_ADDRESS = _device_account.address
+# 게이트 기기 키는 게이트 서비스(gate/)에만 있다. 시공사 백엔드는 주소만 안다
+DEVICE_ADDRESS = config.DEVICE_ADDRESS
 
 # 시공사 현장 감독자(안전관리자). 로그인 없이 이름을 고르면 그 이름에 연결된 키로 서명한다.
 _ADMIN_ACCOUNTS: dict[str, Account] = {name: Account.from_key(key) for name, key in config.ADMIN_SIGNERS.items()}
@@ -87,6 +87,8 @@ CHECKIN_TYPES = {
         {"name": "modelHash", "type": "bytes32"},
         {"name": "evidenceHash", "type": "bytes32"},
         {"name": "nonce", "type": "bytes32"},
+        {"name": "qrIssuedAt", "type": "uint64"},
+        {"name": "qrExpiresAt", "type": "uint64"},
         {"name": "deviceSeq", "type": "uint64"},
         {"name": "timestamp", "type": "uint64"},
     ],
@@ -112,6 +114,17 @@ OVERRIDE_TYPES = {
     ],
 }
 
+EMERGENCY_TYPES = {
+    "EmergencyEntry": [
+        {"name": "caseId", "type": "bytes32"},
+        {"name": "siteId", "type": "bytes32"},
+        {"name": "workerId", "type": "bytes32"},
+        {"name": "reasonCode", "type": "uint8"},
+        {"name": "nonce", "type": "bytes32"},
+        {"name": "timestamp", "type": "uint64"},
+    ],
+}
+
 CASE_ACTION_TYPES = {
     "CaseAction": [
         {"name": "caseId", "type": "bytes32"},
@@ -127,7 +140,7 @@ ACTION_SUBMIT, ACTION_APPROVE, ACTION_REJECT = 1, 2, 3
 CASE_STATUS = ["None", "Submitted", "InspectorApproved", "Finalized", "Rejected"]
 ACTION_NAMES = {1: "submit", 2: "approve", 3: "reject"}
 # 컨트랙트 EntryStatus enum 순서와 같아야 한다
-ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly", "HeldHazardsOpen"]
+ENTRY_STATUS = ["Granted", "Denied", "HeldNoAssessment", "LateAuditOnly", "HeldHazardsOpen", "SuspectTimestamp"]
 ROLE_IDS = {
     "device": Web3.keccak(text="GATE_DEVICE_ROLE"),
     "supervisor": Web3.keccak(text="SUPERVISOR_ROLE"),
@@ -256,34 +269,7 @@ def _now() -> int:
 # ----------------------------------------------------------------------
 
 
-def build_and_sign_checkin(
-    case_id: bytes,
-    worker_id: bytes,
-    site_id: bytes,
-    helmet_pass: bool,
-    shoes_pass: bool,
-    alcohol_pass: bool,
-    model_hash: bytes,
-    evidence: bytes,
-    nonce: bytes,
-    device_seq: int,
-    signed_at: int | None = None,
-) -> dict:
-    """게이트 기기 키로 서명. device_seq는 기기가 매기는 일련번호(빠진 번호 = 누락)."""
-    checkin = {
-        "caseId": case_id,
-        "workerId": worker_id,
-        "siteId": site_id,
-        "helmetPass": helmet_pass,
-        "shoesPass": shoes_pass,
-        "alcoholPass": alcohol_pass,
-        "modelHash": model_hash,
-        "evidenceHash": evidence,
-        "nonce": nonce,
-        "deviceSeq": device_seq,
-        "timestamp": signed_at if signed_at is not None else _now(),
-    }
-    return {"checkin": checkin, "signature": _sign(CHECKIN_TYPES, checkin, _device_account)}
+# 서명은 게이트 서비스(gate/main.py)가 한다. 시공사 백엔드는 서명된 기록을 체인에 전달(릴레이)만 한다.
 
 
 def submit_checkin(checkin: dict, signature: bytes) -> str:
@@ -329,6 +315,47 @@ def build_and_sign_site_record(
         "timestamp": _now(),
     }
     return {"record": record, "signature": _sign(SITE_RECORD_TYPES, record, account), "signerAddress": account.address}
+
+
+# ----------------------------------------------------------------------
+# 긴급·장비 장애 예외 출입 (감독자 + 감리 또는 발주처)
+# ----------------------------------------------------------------------
+
+
+def build_and_sign_emergency(case_id, site_id, worker_id, reason_code, nonce, supervisor_name, reviewer_role) -> dict:
+    message = {
+        "caseId": case_id, "siteId": site_id, "workerId": worker_id,
+        "reasonCode": reason_code, "nonce": nonce, "timestamp": _now(),
+    }
+    supervisor = supervisor_account(supervisor_name)
+    _, reviewer = reviewer_account(reviewer_role)  # 데모에서만 백엔드가 감리·발주처 키를 갖고 있음
+    return {
+        "entry": message,
+        "supervisorSig": _sign(EMERGENCY_TYPES, message, supervisor),
+        "reviewerSig": _sign(EMERGENCY_TYPES, message, reviewer),
+    }
+
+
+def submit_emergency(message: dict, supervisor_sig: bytes, reviewer_sig: bytes) -> str:
+    fields = [f["name"] for f in EMERGENCY_TYPES["EmergencyEntry"]]
+    return _send(contract.functions.submitEmergencyEntry(tuple(message[k] for k in fields), supervisor_sig, reviewer_sig))
+
+
+def get_emergencies(site_id_plain: str) -> list[dict]:
+    rows = contract.functions.getEmergencyEntries(site_id_hash(site_id_plain), 0, 1000).call()
+    fields = [f["name"] for f in EMERGENCY_TYPES["EmergencyEntry"]]
+    out = []
+    for data, supervisor, approver, anchored_at in rows:
+        d = dict(zip(fields, data))
+        out.append({
+            "nonce": to_hex0x(d["nonce"]),
+            "caseId": to_hex0x(d["caseId"]),
+            "reasonCode": d["reasonCode"],
+            "supervisor": name_for_address(supervisor) or supervisor,
+            "approver": name_for_address(approver) or approver,
+            "anchoredAt": anchored_at,
+        })
+    return out
 
 
 def submit_site_record(record: dict, signature: bytes) -> str:
@@ -404,8 +431,13 @@ def get_onchain_site_record(nonce: bytes) -> dict | None:
 
 
 def get_site_stats(site_id_plain: str) -> dict:
-    checkins, failed, overrides, held, late = contract.functions.getSiteStats(site_id_hash(site_id_plain)).call()
-    return {"checkIns": checkins, "failed": failed, "overrides": overrides, "held": held, "late": late}
+    checkins, failed, overrides, held, late, suspect, emergencies = contract.functions.getSiteStats(
+        site_id_hash(site_id_plain)
+    ).call()
+    return {
+        "checkIns": checkins, "failed": failed, "overrides": overrides, "held": held, "late": late,
+        "suspect": suspect, "emergencies": emergencies,
+    }
 
 
 def is_entry_allowed(nonce: bytes) -> bool:

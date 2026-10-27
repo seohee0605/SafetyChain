@@ -21,7 +21,24 @@ _load_env_file()
 RPC_URL = os.environ.get("RPC_URL", "http://127.0.0.1:8545")
 CONTRACT_ADDRESS = os.environ["CONTRACT_ADDRESS"]
 SENDER_PRIVATE_KEY = os.environ["SENDER_PRIVATE_KEY"]
-DEVICE_PRIVATE_KEY = os.environ["DEVICE_PRIVATE_KEY"]
+
+
+def _device_address() -> str:
+    """게이트 기기 주소. 기기 키는 게이트 서비스(gate/)에만 있고 시공사 백엔드는 주소만 안다.
+    예전 .env처럼 DEVICE_PRIVATE_KEY만 있으면 주소만 계산해서 쓰고, 키는 쓰지 않는다 (지우는 걸 권장)."""
+    addr = os.environ.get("DEVICE_ADDRESS", "").strip()
+    if addr:
+        return addr
+    legacy = os.environ.get("DEVICE_PRIVATE_KEY", "").strip()
+    if legacy:
+        from eth_account import Account
+
+        print("[config] DEVICE_PRIVATE_KEY는 이제 gate/.env로 옮기고 backend/.env에는 DEVICE_ADDRESS만 두세요")
+        return Account.from_key(legacy).address
+    raise KeyError("DEVICE_ADDRESS")
+
+
+DEVICE_ADDRESS = _device_address()
 
 
 def _parse_admin_signers(raw: str) -> dict[str, str]:
@@ -66,5 +83,32 @@ WORKER_PSEUDONYM_KEY = _load_pseudonym_key()
 # 감리 감사 저장소 (시공사 백엔드와 별도 프로세스·별도 DB). 게이트가 서명 직후 체인 제출 전에 사본을 보낸다.
 AUDIT_URL = os.environ.get("AUDIT_URL", "http://127.0.0.1:8100")
 
+# 게이트 기기 서비스 (기기 키·YOLO 보유). 검증뷰가 현재 모델 해시를 물어볼 때 쓴다
+GATE_URL = os.environ.get("GATE_URL", "http://127.0.0.1:8200")
+
 # 시연용 제어(릴레이 중단, 지연 전송 재현, 기기 해제·재등록)를 켤지. 실서비스에서는 꺼둔다.
 DEMO_CONTROLS = os.environ.get("DEMO_CONTROLS", "0") == "1"
+
+
+def _load_photo_key() -> bytes:
+    """검사 사진 암호화 키 (AES-256-GCM). .env의 PHOTO_KEY(64자리 hex)를 우선, 없으면 backend/photo.key 생성.
+    사진에는 작업자 얼굴이 찍히므로 디스크에 평문으로 두지 않는다."""
+    raw = os.environ.get("PHOTO_KEY", "").strip()
+    if not raw:
+        key_file = Path(__file__).parent / "photo.key"
+        if not key_file.exists():
+            import secrets
+
+            key_file.write_text(secrets.token_hex(32))
+        raw = key_file.read_text().strip()
+    key = bytes.fromhex(raw)
+    if len(key) != 32:
+        raise ValueError("PHOTO_KEY must be 32 bytes (64 hex chars)")
+    return key
+
+
+PHOTO_KEY = _load_photo_key()
+
+# 사고 조사 담당자 토큰. 이 토큰이 있어야 가명 → 사번 확인, 검사 사진 열람이 되고, 모든 열람은 로그로 남는다.
+# 비워두면 조사용 열람 API는 꺼진다.
+INVESTIGATOR_TOKEN = os.environ.get("INVESTIGATOR_TOKEN", "").strip()

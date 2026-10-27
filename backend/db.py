@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS checkins (
     alcohol_pass INTEGER NOT NULL,  -- bool만. 수치는 어디에도 저장하지 않는다.
     model_hash TEXT NOT NULL,
     evidence_hash TEXT,            -- 검사 사진 SHA-256 (온체인에도 기록)
-    image_path TEXT,               -- 사진 원본 위치 (오프체인)
+    image_path TEXT,               -- 사진 위치 (오프체인, AES-GCM 암호화 .enc)
     device_address TEXT NOT NULL,
     signature TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
@@ -71,10 +71,26 @@ CREATE TABLE IF NOT EXISTS checkins (
     device_seq INTEGER             -- 게이트 기기 일련번호
 );
 
--- 게이트 기기의 일련번호 카운터 (기기 로컬 상태를 시뮬레이션). 서명할 때마다 1씩 증가
-CREATE TABLE IF NOT EXISTS device_state (
-    device_address TEXT PRIMARY KEY,
-    last_seq INTEGER NOT NULL
+-- 긴급·장비 장애 예외 출입 (감독자 + 감리/발주처 이중 서명, 원본 기준은 체인)
+CREATE TABLE IF NOT EXISTS emergencies (
+    nonce TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    site_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,          -- 사번 (오프체인 전용, 체인에는 날짜별 가명만)
+    reason_code INTEGER NOT NULL,
+    supervisor_address TEXT NOT NULL,
+    approver_address TEXT NOT NULL,
+    tx_hash TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+
+-- 사고 조사용 열람 기록 (가명 → 사번 확인, 검사 사진 열람). 누가·언제·왜 봤는지
+CREATE TABLE IF NOT EXISTS access_log (
+    kind TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    investigator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at INTEGER NOT NULL
 );
 
 -- 시연 설정 (릴레이 모드 등)
@@ -419,20 +435,6 @@ def list_checkins_by_worker(worker_id: str, site_id: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def next_device_seq(device_address: str) -> int:
-    """게이트 기기의 다음 일련번호. 서명에 쓰인 번호는 체인 제출 실패와 무관하게 소진된다
-    (서명은 됐는데 체인에 없으면 그대로 '누락'으로 보이는 게 맞다)."""
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO device_state (device_address, last_seq) VALUES (?, 1) "
-            "ON CONFLICT(device_address) DO UPDATE SET last_seq = last_seq + 1",
-            (device_address.lower(),),
-        )
-        return conn.execute(
-            "SELECT last_seq FROM device_state WHERE device_address = ?", (device_address.lower(),)
-        ).fetchone()["last_seq"]
-
-
 def get_setting(key: str, default: str) -> str:
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -486,3 +488,42 @@ def list_rejections(site_id: str, limit: int = 50) -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM rejected_submissions WHERE site_id = ? ORDER BY at DESC LIMIT ?", (site_id, limit)
         ).fetchall()
+
+
+def list_checkins_by_site(site_id: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT nonce, device_seq FROM checkins WHERE site_id = ? ORDER BY timestamp DESC", (site_id,)
+        ).fetchall()
+
+
+def record_emergency(
+    nonce: str, case_id: str, site_id: str, worker_id: str, reason_code: int, supervisor_address: str,
+    approver_address: str, tx_hash: str, timestamp: int,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO emergencies (nonce, case_id, site_id, worker_id, reason_code, supervisor_address,
+               approver_address, tx_hash, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (nonce, case_id, site_id, worker_id, reason_code, supervisor_address, approver_address, tx_hash, timestamp),
+        )
+
+
+def list_emergencies_by_case(case_id: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM emergencies WHERE case_id = ? ORDER BY timestamp DESC", (case_id,)
+        ).fetchall()
+
+
+def log_access(kind: str, nonce: str, investigator: str, reason: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO access_log (kind, nonce, investigator, reason, at) VALUES (?, ?, ?, ?, ?)",
+            (kind, nonce, investigator, reason, int(time.time())),
+        )
+
+
+def list_access_log(limit: int = 200) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM access_log ORDER BY at DESC LIMIT ?", (limit,)).fetchall()

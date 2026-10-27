@@ -6,3 +6,4 @@ safetychain.db
 models/*.pt
 uploads/
 pseudonym.key
+photo.key

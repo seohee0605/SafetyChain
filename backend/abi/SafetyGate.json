@@ -87,6 +87,19 @@
   },
   {
     "type": "function",
+    "name": "CHECKIN_SUSPECT_FUTURE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "CONTRACTOR_ADMIN_ROLE",
     "inputs": [],
     "outputs": [
@@ -126,6 +139,58 @@
   },
   {
     "type": "function",
+    "name": "EMERGENCY_GATE_FAULT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "EMERGENCY_POWER_NETWORK",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "EMERGENCY_REASON_MAX",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "EMERGENCY_RESCUE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "GATE_DEVICE_ROLE",
     "inputs": [],
     "outputs": [
@@ -153,6 +218,19 @@
   {
     "type": "function",
     "name": "MAX_CLOCK_SKEW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_QR_TTL",
     "inputs": [],
     "outputs": [
       {
@@ -580,6 +658,16 @@
                 "internalType": "bytes32"
               },
               {
+                "name": "qrIssuedAt",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
+                "name": "qrExpiresAt",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
                 "name": "deviceSeq",
                 "type": "uint64",
                 "internalType": "uint64"
@@ -708,6 +796,16 @@
                 "internalType": "bytes32"
               },
               {
+                "name": "qrIssuedAt",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
+                "name": "qrExpiresAt",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
                 "name": "deviceSeq",
                 "type": "uint64",
                 "internalType": "uint64"
@@ -782,6 +880,162 @@
           },
           {
             "name": "received",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getEmergencyEntries",
+    "inputs": [
+      {
+        "name": "siteId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "from",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "to",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple[]",
+        "internalType": "struct SafetyGate.StoredEmergency[]",
+        "components": [
+          {
+            "name": "data",
+            "type": "tuple",
+            "internalType": "struct SafetyGate.EmergencyEntry",
+            "components": [
+              {
+                "name": "caseId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "siteId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "workerId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "reasonCode",
+                "type": "uint8",
+                "internalType": "uint8"
+              },
+              {
+                "name": "nonce",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "timestamp",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
+          },
+          {
+            "name": "supervisor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "approver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "anchoredAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getEmergencyEntry",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.StoredEmergency",
+        "components": [
+          {
+            "name": "data",
+            "type": "tuple",
+            "internalType": "struct SafetyGate.EmergencyEntry",
+            "components": [
+              {
+                "name": "caseId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "siteId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "workerId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "reasonCode",
+                "type": "uint8",
+                "internalType": "uint8"
+              },
+              {
+                "name": "nonce",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "timestamp",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
+          },
+          {
+            "name": "supervisor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "approver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "anchoredAt",
             "type": "uint64",
             "internalType": "uint64"
           }
@@ -1089,6 +1343,16 @@
           },
           {
             "name": "late",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "suspect",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "emergencies",
             "type": "uint64",
             "internalType": "uint64"
           }
@@ -1416,6 +1680,16 @@
             "internalType": "bytes32"
           },
           {
+            "name": "qrIssuedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "qrExpiresAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
             "name": "deviceSeq",
             "type": "uint64",
             "internalType": "uint64"
@@ -1429,6 +1703,61 @@
       },
       {
         "name": "sig",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "submitEmergencyEntry",
+    "inputs": [
+      {
+        "name": "e",
+        "type": "tuple",
+        "internalType": "struct SafetyGate.EmergencyEntry",
+        "components": [
+          {
+            "name": "caseId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "siteId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "workerId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "reasonCode",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "nonce",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "timestamp",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      },
+      {
+        "name": "supervisorSig",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "reviewerSig",
         "type": "bytes",
         "internalType": "bytes"
       }
@@ -1635,6 +1964,43 @@
     "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EmergencyEntryRecorded",
+    "inputs": [
+      {
+        "name": "siteId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "nonce",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reasonCode",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "supervisor",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "approver",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
     "anonymous": false
   },
   {
@@ -2045,6 +2411,22 @@
   },
   {
     "type": "error",
+    "name": "InvalidQrWindow",
+    "inputs": [
+      {
+        "name": "issuedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "expiresAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidReason",
     "inputs": [
       {
@@ -2116,6 +2498,27 @@
         "name": "proposalId",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "QrNotValidAtSigning",
+    "inputs": [
+      {
+        "name": "issuedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "expiresAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "signedAt",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

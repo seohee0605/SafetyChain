@@ -1,0 +1,6 @@
+.env
+gate.db
+__pycache__/
+*.pyc
+.venv/
+models/*.pt

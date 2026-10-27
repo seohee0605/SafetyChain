@@ -31,7 +31,10 @@ contract SafetyGate is AccessControl, EIP712 {
     // ------------------------------------------------------------------
 
     /// @notice 출입 검사: 서명 후 이 시간 안에 체인에 들어오면 정상(출입 근거로 인정).
-    uint64 public constant CHECKIN_ON_TIME = 10 minutes;
+    ///         Sepolia 실측(2026-10-27, 32건): 서명→블록 중앙 8초, 95% 20초, 최대 32초(블록 3개).
+    ///         릴레이 확정 대기 60초 + 재전송 1회 60초 + 여유 60초 = 3분 (실측 최대의 약 5.6배).
+    ///         이보다 늦은 기록은 '지연 도착'(감사용)으로만 남고, 그동안의 출입은 예외 출입 절차로 처리한다.
+    uint64 public constant CHECKIN_ON_TIME = 3 minutes;
     /// @notice 출입 검사: 이 시간까지는 '지연 도착'으로 저장(감사용, 출입 근거 X), 넘으면 명백한 소급으로 거부.
     uint64 public constant CHECKIN_LATE_LIMIT = 24 hours;
     /// @notice 위험성평가·Override·Case 승인: 서명 시점에 서명하고 이 시간 안에 제출해야 한다. 지연 단계 없음.
@@ -41,7 +44,8 @@ contract SafetyGate is AccessControl, EIP712 {
     /// @notice 출입 검사: 1분 넘게 미래지만 이 시간 안이면 '의심(기기 시계 이상)'으로 저장, 넘으면 거부.
     uint64 public constant CHECKIN_SUSPECT_FUTURE = 10 minutes;
     /// @notice 일회용 QR의 최대 유효기간. 발급~만료가 이보다 길면 일회용 출입 권한으로 보지 않는다.
-    uint64 public constant MAX_QR_TTL = 10 minutes;
+    ///         QR은 서명 시각과 비교하므로 체인 지연(실측 최대 32초)을 담을 필요가 없다 → 시공사 발급 기준(5분)에 맞춘다.
+    uint64 public constant MAX_QR_TTL = 5 minutes;
     /// @notice '해당 날짜' 판정 기준 시간대 (KST = UTC+9). 위험성평가는 출입과 같은 KST 날짜에 체인에 올라와야 유효하다.
     uint64 public constant DAY_OFFSET = 9 hours;
 

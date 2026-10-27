@@ -876,12 +876,13 @@ contract SafetyGateTest is Test {
     function test_checkIn_onTimeEdgeIsNotLate() public {
         _assess(true);
         SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
-        c.timestamp = uint64(block.timestamp - 10 minutes);
+        // 정상 판정 기준(Sepolia 실측 근거 3분)의 정확히 경계는 정상, 1초 넘으면 지연
+        c.timestamp = uint64(block.timestamp - gate.CHECKIN_ON_TIME());
         gate.submitCheckIn(c, _signCheckIn(c, devicePk));
         assertEq(uint8(_status(c.nonce)), uint8(SafetyGate.EntryStatus.Granted));
 
         SafetyGate.CheckIn memory c2 = _checkIn(_nonce(), true, true, true);
-        c2.timestamp = uint64(block.timestamp - 10 minutes - 1);
+        c2.timestamp = uint64(block.timestamp - gate.CHECKIN_ON_TIME() - 1);
         gate.submitCheckIn(c2, _signCheckIn(c2, devicePk));
         assertEq(uint8(_status(c2.nonce)), uint8(SafetyGate.EntryStatus.LateAuditOnly));
     }
@@ -1090,6 +1091,21 @@ contract SafetyGateTest is Test {
         SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
         c.qrIssuedAt = uint64(block.timestamp - 1 minutes);
         c.qrExpiresAt = uint64(block.timestamp + 1 days); // 하루짜리 QR은 일회용 출입 권한이 아님
+        bytes memory sig = _signCheckInRaw(c, devicePk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidQrWindow.selector, c.qrIssuedAt, c.qrExpiresAt));
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_qr_windowJustOverMax_rejected() public {
+        // 시공사 QR 발급 기준(5분)과 같은 온체인 상한: 5분은 통과, 5분 1초짜리 QR은 거부
+        SafetyGate.CheckIn memory ok = _checkIn(_nonce(), true, true, true);
+        ok.qrIssuedAt = uint64(block.timestamp - 1 minutes);
+        ok.qrExpiresAt = ok.qrIssuedAt + gate.MAX_QR_TTL();
+        gate.submitCheckIn(ok, _signCheckInRaw(ok, devicePk));
+
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.qrIssuedAt = uint64(block.timestamp - 1 minutes);
+        c.qrExpiresAt = c.qrIssuedAt + gate.MAX_QR_TTL() + 1;
         bytes memory sig = _signCheckInRaw(c, devicePk);
         vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidQrWindow.selector, c.qrIssuedAt, c.qrExpiresAt));
         gate.submitCheckIn(c, sig);

@@ -8,6 +8,7 @@ type QrIssue = { nonce: string; expiresAt: number }
 type EntryStatus = 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly' | 'SuspectTimestamp'
 type GateResult = {
   anchored: boolean
+  pending?: boolean // 트랜잭션은 보냈지만 릴레이 대기 시간(60초) 안에 블록에 안 들어감
   txHash: string | null
   verdict: boolean
   nonce: string
@@ -272,6 +273,27 @@ export default function Gate() {
     }
   }
 
+  // '확정 대기': 트랜잭션이 60초 안에 블록에 안 들어간 경우. 정상 판정 기준(서명 후 3분) 동안 4초마다 체인을 다시 본다.
+  // 그 안에 들어가면 체인 판정대로 결과를 바꾸고, 끝내 안 들어가면 '기록 미확정'으로 남긴다 (Gatekeeper 유지)
+  const pendingNonce = result && !result.anchored && result.pending ? result.nonce : null
+  useEffect(() => {
+    if (!pendingNonce) return
+    const startedAt = Date.now()
+    const timer = setInterval(async () => {
+      const res = await fetch(`${BACKEND_URL}/gate/status/${pendingNonce}`).catch(() => null)
+      const body = res?.ok ? await res.json() : null
+      if (body?.anchored) {
+        clearInterval(timer)
+        setResult((r) => (r && r.nonce === pendingNonce ? { ...r, ...body, pending: false } : r))
+        setStage('confirmed')
+      } else if (Date.now() - startedAt > 3 * 60 * 1000) {
+        clearInterval(timer)
+        setResult((r) => (r && r.nonce === pendingNonce ? { ...r, pending: false } : r))
+      }
+    }, 4000)
+    return () => clearInterval(timer)
+  }, [pendingNonce])
+
   // 게이트 고장·응급 상황 등 정상 검사를 못 할 때의 별도 절차. 감독자 + 감리(또는 발주처) 둘 다 서명해야 기록된다
   async function submitEmergency() {
     setEmergencyError(null)
@@ -533,7 +555,12 @@ function ResultScreen(props: {
   let icon = ''
   let title = '처리 중'
   let message = ''
-  if (done && !result.anchored) {
+  if (done && !result.anchored && result.pending) {
+    tone = 'bg-charcoal-light text-white'
+    icon = '⧗'
+    title = '블록체인 확정 대기'
+    message = '기록은 전송됐지만 아직 블록에 들어가지 않았습니다. 이 화면에서 잠시 기다리세요. 확정되면 결과가 자동으로 바뀝니다'
+  } else if (done && !result.anchored) {
     tone = 'bg-charcoal-light text-white'
     icon = '?'
     title = '기록 미확정'

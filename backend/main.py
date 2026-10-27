@@ -341,6 +341,27 @@ def gate_relay(checkin: str = Form(...), signature: str = Form(...), image: Uplo
     }
 
 
+@app.get("/gate/status/{nonce}")
+def gate_status(nonce: str):
+    """'확정 대기'였던 게이트 기록이 블록에 들어갔는지 확인한다. 키오스크가 몇 초마다 묻는다.
+    판정은 여전히 체인 값으로만 한다 (Gatekeeper)."""
+    nonce_bytes = _parse_nonce(nonce)
+    if db.get_checkin(nonce) is None:
+        raise HTTPException(404, "no check-in recorded for this nonce")
+    onchain = chain.get_onchain_checkin(nonce_bytes)
+    if onchain is None:
+        return {"anchored": False, "pending": True}
+    db.set_checkin_anchored(nonce, onchain["status"], onchain["device"])
+    data = onchain["data"]
+    return {
+        "anchored": True,
+        "pending": False,
+        "entryStatus": onchain["status"],
+        "entryAllowed": onchain["status"] == "Granted",
+        "overridable": onchain["status"] == "Denied" and data["alcoholPass"],
+    }
+
+
 @app.get("/gate/records/{site}")
 def gate_records(site: str):
     """시공사 DB에 남은 게이트 기록 목록 (nonce·기기 일련번호만). 감사 저장소가 3자 대조에 쓴다."""

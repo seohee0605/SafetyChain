@@ -275,6 +275,15 @@ def record_checkin(
         )
 
 
+def set_checkin_anchored(nonce: str, entry_status: str, device_address: str) -> None:
+    """'확정 대기'로 저장했던 기록이 나중에 블록에 들어가면 체인 값으로 채운다."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE checkins SET entry_status = ?, device_address = ? WHERE nonce = ? AND entry_status IS NULL",
+            (entry_status, device_address, nonce),
+        )
+
+
 def get_checkin(nonce: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute("SELECT * FROM checkins WHERE nonce = ?", (nonce,)).fetchone()

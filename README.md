@@ -36,12 +36,16 @@ SafetyChain은 안전모·안전화·음주 검사 결과, 일일 위험성평�
 ## 아키텍처
 
 ```
-[작업자] → QR(1회용 nonce) 발급 → [게이트 웹캠] YOLO 안전모·안전화 판정
-    → [게이트 기기] EIP-712 서명 (판정 결과 + 모델 해시 + 사진 해시)
-    → [SafetyGate 컨트랙트] 온체인 앵커링 → 확정된 뒤에만 게이트 결과 표시
+[작업자] → QR(1회용 nonce) 발급 → [키오스크 웹캠] → [게이트 기기 서비스] YOLO 안전모·안전화 판정
+    → 게이트 기기 키로 EIP-712 서명 (판정 결과 + 모델 해시 + 사진 해시 + QR 유효기간 + 기기 일련번호)
+    → 감리 감사 저장소로 사본 전송 → 시공사 릴레이가 [SafetyGate 컨트랙트]에 제출
+    → 컨트랙트가 출입 상태(허가·불합격·보류·지연·의심)를 정함 → 확정된 뒤에만 게이트 결과 표시
     → 보호구 불합격이면 [감독자] 사유 코드와 함께 수동 처리 (음주 불합격은 불가)
 
 [감독자] 위험성평가 작성 → 원문은 SQLite, 해시만 온체인 (SiteRecord)
+
+[감리 감사] 게이트 원본 · 시공사 DB · 블록체인 3자 대조 → 미제출·바꿔치기·DB 조작 표시
+[예외 출입] 게이트 고장·응급 시 감독자 + 감리(또는 발주처) 이중 서명
 
 [케이스 확정] 현장·작업일 단위
     시공사 감독자 제출 → 감리 승인 → 발주처 승인 = 확정
@@ -73,7 +77,7 @@ SafetyChain은 안전모·안전화·음주 검사 결과, 일일 위험성평�
 |---|---|
 | 컨트랙트 | Solidity 0.8.24 + Foundry + OpenZeppelin AccessControl |
 | 체인 | Anvil (개발) / Sepolia (데모) |
-| 백엔드 | Python 3.11 + FastAPI + web3.py + eth-account + ultralytics |
+| 백엔드 | Python 3.11 + FastAPI + web3.py + eth-account (시공사 백엔드·게이트 서비스·감사 저장소 3개) |
 | DB | SQLite |
 | 프론트 | Vite + React + TypeScript + viem + Tailwind |
 | AI | Ultralytics YOLO 사전학습 모델 (파인튜닝 없음) |
@@ -86,13 +90,16 @@ safetychain/
 │  ├─ src/SafetyGate.sol
 │  ├─ test/SafetyGate.t.sol
 │  └─ script/Deploy.s.sol
-├─ backend/            # FastAPI
-│  ├─ main.py          # 라우트
-│  ├─ chain.py         # web3 연동 + EIP-712 서명
-│  ├─ vision.py        # YOLO 추론
+├─ backend/            # 시공사 백엔드 (포트 8000): QR·릴레이·위험성평가·케이스. 게이트 기기 키 없음
+│  ├─ main.py
+│  ├─ chain.py         # web3 연동 + EIP-712 서명 + 릴레이
 │  └─ db.py            # SQLite
+├─ gate/               # 게이트 기기 서비스 (포트 8200): 기기 키·일련번호·YOLO
+│  ├─ main.py
+│  └─ vision.py        # YOLO 추론 (가중치는 gate/models/)
+├─ audit/              # 감리 감사 저장소 (포트 8100): 3자 대조
 └─ frontend/           # Vite + React
-   └─ src/pages/{Gate,SiteRecord,CaseReview,Dashboard,Verify}.tsx
+   └─ src/pages/{Gate,SiteRecord,CaseReview,Dashboard,Audit,Verify,Worker}.tsx
 ```
 
 ## 로컬 실행
@@ -103,7 +110,7 @@ safetychain/
 cd contracts
 forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
 anvil                                   # 별도 터미널에서 로컬 체인 실행
-forge test                              # 76개 테스트
+forge test                              # 92개 테스트
 
 # 배포 + 게이트 기기/감독자 등록 (감리 키로 승인 서명까지 스크립트에서 처리)
 export DEVICE_ADDRESS=0x...
@@ -113,14 +120,29 @@ export OWNER_ADDRESS=0x...
 forge script script/Deploy.s.sol:DeployScript --rpc-url http://127.0.0.1:8545 --broadcast --private-key <릴레이 키>
 ```
 
-### 2. 백엔드
+### 2. 시공사 백엔드
 
 ```bash
 cd backend
 pip install -r requirements.txt
-cp .env.example .env                    # CONTRACT_ADDRESS, 각 역할 키 채우기 (SENDER_PRIVATE_KEY = 배포한 릴레이 키)
-uvicorn main:app --reload
+cp .env.example .env                    # CONTRACT_ADDRESS, 각 역할 키 (SENDER_PRIVATE_KEY = 배포한 릴레이 키)
+uvicorn main:app --reload               # 포트 8000
 ```
+
+게이트 기기 키(`DEVICE_PRIVATE_KEY`)는 이제 `gate/.env`에만 넣고, 여기에는 `DEVICE_ADDRESS`만 둡니다.
+사고 조사용 열람 API를 쓰려면 `INVESTIGATOR_TOKEN`을 채웁니다 (비우면 꺼짐). 검사 사진은 암호화돼 저장됩니다.
+
+### 2-1. 게이트 기기 서비스
+
+```bash
+cd gate
+pip install -r requirements.txt
+cp .env.example .env                    # CONTRACT_ADDRESS, DEVICE_PRIVATE_KEY
+mv ../backend/models/*.pt models/       # 예전에 backend/models에 받아둔 YOLO 가중치를 옮김
+uvicorn main:app --port 8200
+```
+
+키오스크(게이트 화면)는 시공사 백엔드가 아니라 이 서비스로 검사를 보냅니다.
 
 ### 3. 감리 감사 저장소
 

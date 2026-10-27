@@ -38,6 +38,8 @@ contract SafetyGate is AccessControl, EIP712 {
     uint64 public constant RECORD_WINDOW = 1 hours;
     /// @notice 기기 시계 오차 허용치. 서명 시각이 블록 시각보다 이만큼 이상 미래면 거부한다.
     uint64 public constant MAX_CLOCK_SKEW = 1 minutes;
+    /// @notice '해당 날짜' 판정 기준 시간대 (KST = UTC+9). 위험성평가는 출입과 같은 KST 날짜에 체인에 올라와야 유효하다.
+    uint64 public constant DAY_OFFSET = 9 hours;
 
     /// @notice 서명자 해제 사유 코드.
     uint8 public constant REVOKE_KEY_COMPROMISED = 1; // 키 유출 의심
@@ -649,10 +651,20 @@ contract SafetyGate is AccessControl, EIP712 {
     function _entryStatus(CheckIn calldata c, bool onTime, bool allPassed) private view returns (EntryStatus) {
         if (!onTime) return EntryStatus.LateAuditOnly;
         Assessment storage a = _assessments[c.caseId];
-        if (a.anchoredAt == 0 || a.siteId != c.siteId || !a.hazardsControlled) {
+        // 출입 허가 조건 ①: 당일(KST) 이 현장에 위험요인 조치가 끝난 위험성평가가 체인에 있어야 한다.
+        // caseId는 게이트가 넣는 값이라, 어제 caseId를 재사용하지 못하도록 평가의 블록 시각 날짜까지 확인한다.
+        if (
+            a.anchoredAt == 0 || a.siteId != c.siteId || !a.hazardsControlled
+                || _dayOf(a.anchoredAt) != _dayOf(block.timestamp)
+        ) {
             return EntryStatus.HeldNoAssessment;
         }
+        // 출입 허가 조건 ②: 안전검사 통과. (조건 ③ 출입 권한 1회 사용은 submitCheckIn 첫 줄 _consumeNonce가 보장)
         return allPassed ? EntryStatus.Granted : EntryStatus.Denied;
+    }
+
+    function _dayOf(uint256 ts) private pure returns (uint256) {
+        return (ts + DAY_OFFSET) / 1 days;
     }
 
     function _recoverWithRole(bytes32 structHash, bytes calldata sig, bytes32 role) private view returns (address) {

@@ -942,4 +942,48 @@ contract SafetyGateTest is Test {
         );
         gate.submitOverride(o, sig);
     }
+
+    // ==================================================================
+    // 10. 위험성평가는 '해당 날짜' 것이어야 한다 (Q5 보완)
+    // ==================================================================
+
+    function test_entry_yesterdaysAssessment_doesNotCountToday() public {
+        // 어제 낸 평가의 caseId를 오늘 출입 기록에 그대로 쓰면 평가를 안 하고도 출입이 열리는 구멍
+        _assess(true);
+        vm.warp(block.timestamp + 1 days);
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+        assertFalse(gate.isEntryAllowed(nonce));
+    }
+
+    function test_entry_sameKstDayAssessment_counts() public {
+        // KST 기준 같은 날이면 아침 평가로 오후 출입이 열린다
+        uint256 kstMidnight = ((block.timestamp + 9 hours) / 1 days) * 1 days - 9 hours;
+        vm.warp(kstMidnight + 6 hours); // KST 06:00 평가
+        _assess(true);
+        vm.warp(kstMidnight + 17 hours); // KST 17:00 출입
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.Granted));
+    }
+
+    function test_entry_assessmentJustBeforeKstMidnight_doesNotCountNextDay() public {
+        uint256 kstMidnight = ((block.timestamp + 9 hours) / 1 days) * 1 days - 9 hours;
+        vm.warp(kstMidnight + 1 days - 5 minutes); // KST 23:55 평가
+        _assess(true);
+        vm.warp(kstMidnight + 1 days + 5 minutes); // 다음 날 KST 00:05 출입
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+    }
+
+    function test_entry_entryRightIsOneTime() public {
+        // 출입 권한(QR nonce)은 한 번만 쓸 수 있다: 같은 QR로 두 번째 출입 기록은 거부
+        _assess(true);
+        bytes32 nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+        SafetyGate.CheckIn memory c2 = _checkIn(nonce, true, true, true); // 같은 QR, 다른 일련번호
+        bytes memory sig2 = _signCheckIn(c2, devicePk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.NonceAlreadyUsed.selector, nonce));
+        gate.submitCheckIn(c2, sig2);
+    }
 }

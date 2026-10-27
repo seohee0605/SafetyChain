@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Card, ErrorText, Input, PageTitle, PrimaryButton, SecondaryButton, Select, StatusBadge, StepHeading, TechDetails } from '../components/ui'
 import { BACKEND_URL } from '../config'
+import { shortAddr, signTyped, type TypedData } from '../wallet'
 
 type Admin = { name: string; address: string }
 type Reviewer = { role: 'inspector' | 'owner'; name: string; address: string }
@@ -69,6 +70,8 @@ export default function CaseReview() {
   const [check, setCheck] = useState<CaseVerify | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [signingMode, setSigningMode] = useState<'wallet' | 'server'>('wallet')
+  const [signedBy, setSignedBy] = useState<string | null>(null)
 
   useEffect(() => {
     fetch(`${BACKEND_URL}/admins`)
@@ -85,6 +88,10 @@ export default function CaseReview() {
     fetch(`${BACKEND_URL}/reasons`)
       .then((res) => res.json())
       .then((r: { reject: Reason[] }) => setRejectReasons(r.reject))
+      .catch(() => {})
+    fetch(`${BACKEND_URL}/signing-mode`)
+      .then((res) => res.json())
+      .then((m: { mode: 'wallet' | 'server' }) => setSigningMode(m.mode))
       .catch(() => {})
   }, [])
 
@@ -113,6 +120,42 @@ export default function CaseReview() {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail ?? '제출 실패')
       }
+      await loadCase()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '알 수 없는 오류')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 감리·발주처 검토: 지갑 모드에서는 서버가 서명할 내용만 주고, 서명은 검토자의 지갑에서 만든다
+  async function review(decision: 'approve' | 'reject') {
+    if (!turn) return
+    const body = { reviewer: turn, decision, reasonCode: decision === 'reject' ? rejectCode : 0 }
+    if (signingMode === 'server') return post('/case/review', body)
+    setError(null)
+    setSignedBy(null)
+    setLoading(true)
+    try {
+      const prep = await fetch(`${BACKEND_URL}/case/review/prepare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId, workDate, ...body }),
+      })
+      const p = await prep.json().catch(() => ({}))
+      if (!prep.ok) throw new Error(p.detail ?? '서명 준비 실패')
+      const { address, signature } = await signTyped(p.typedData as TypedData)
+      if (reviewer && address.toLowerCase() !== reviewer.address.toLowerCase()) {
+        throw new Error(`연결된 지갑(${shortAddr(address)})이 ${reviewer.name} 주소(${shortAddr(reviewer.address)})가 아닙니다. 지갑 계정을 바꿔 주세요`)
+      }
+      const res = await fetch(`${BACKEND_URL}/case/review/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce: p.nonce, signature }),
+      })
+      const r = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(r.detail ?? '제출 실패')
+      setSignedBy(address)
       await loadCase()
     } catch (e) {
       setError(e instanceof Error ? e.message : '알 수 없는 오류')
@@ -276,14 +319,18 @@ export default function CaseReview() {
         <Card>
           <StepHeading step={3}>{turn === 'inspector' ? '감리 검토' : '발주처 최종 검토'}</StepHeading>
           <p className="text-xs text-ink-muted">
-            서명자: {reviewer?.name ?? '설정되지 않음'} · 시공사가 제출한 범위 그대로 승인 또는 반려합니다.
+            서명자: {reviewer ? `${reviewer.name} (${shortAddr(reviewer.address)})` : '설정되지 않음'} · 시공사가 제출한 범위 그대로 승인 또는 반려합니다.
           </p>
-          <PrimaryButton
-            onClick={() => post('/case/review', { reviewer: turn, decision: 'approve' })}
-            disabled={!reviewer || loading}
-            className="w-full"
-          >
-            {loading ? '서명 중...' : '승인'}
+          {signingMode === 'wallet' ? (
+            <p className="text-xs bg-paper-dark border-2 border-charcoal/30 p-2.5 text-ink">
+              {turn === 'inspector' ? '감리' : '발주처'} 담당자의 지갑(MetaMask)으로 서명합니다. 서버는 이 서명을 대신 만들 수 없고,
+              가스비는 시공사가 냅니다.
+            </p>
+          ) : (
+            <p className="text-xs text-hazard-red">백업 모드: 서버가 보관한 키로 대신 서명합니다 (데모 장애 대비용)</p>
+          )}
+          <PrimaryButton onClick={() => review('approve')} disabled={!reviewer || loading} className="w-full">
+            {loading ? '지갑 서명 대기 중...' : signingMode === 'wallet' ? '지갑으로 서명해 승인' : '승인'}
           </PrimaryButton>
           <div className="flex gap-2">
             <Select value={rejectCode} onChange={(e) => setRejectCode(Number(e.target.value))} className="flex-1">
@@ -293,13 +340,11 @@ export default function CaseReview() {
                 </option>
               ))}
             </Select>
-            <SecondaryButton
-              onClick={() => post('/case/review', { reviewer: turn, decision: 'reject', reasonCode: rejectCode })}
-              disabled={!reviewer || loading}
-            >
-              반려
+            <SecondaryButton onClick={() => review('reject')} disabled={!reviewer || loading}>
+              {signingMode === 'wallet' ? '지갑으로 반려' : '반려'}
             </SecondaryButton>
           </div>
+          {signedBy && <p className="text-xs text-hazard-green font-semibold">{shortAddr(signedBy)} 지갑 서명으로 기록됐습니다</p>}
         </Card>
       )}
 

@@ -39,13 +39,33 @@ _ADMIN_ACCOUNTS: dict[str, Account] = {name: Account.from_key(key) for name, key
 ADMIN_NAMES = list(_ADMIN_ACCOUNTS.keys())
 ADMIN_ADDRESSES = {name: acc.address for name, acc in _ADMIN_ACCOUNTS.items()}
 
-# 감리·발주처 (데모용으로 각 1명)
-_INSPECTOR = {name: Account.from_key(key) for name, key in config.INSPECTOR_SIGNER.items()}
-_OWNER = {name: Account.from_key(key) for name, key in config.OWNER_SIGNER.items()}
+# 감리·발주처 (데모용으로 각 1명).
+# 기본(wallet 모드)에서는 주소만 알고 키는 없다. 서명은 각자 지갑에서 만들어 보낸다.
+# server 모드(백업)에서만 키를 갖고 대신 서명한다.
+_INSPECTOR_KEYS = {name: Account.from_key(key) for name, key in config.INSPECTOR_SIGNER.items()}
+_OWNER_KEYS = {name: Account.from_key(key) for name, key in config.OWNER_SIGNER.items()}
 
-_NAME_BY_ADDRESS = {
-    acc.address.lower(): name for group in (_ADMIN_ACCOUNTS, _INSPECTOR, _OWNER) for name, acc in group.items()
+
+def _reviewer_entry(accounts: dict, keys: dict) -> tuple[str, str] | None:
+    if keys:
+        name, acc = next(iter(keys.items()))
+        return name, acc.address
+    if accounts:
+        name, addr = next(iter(accounts.items()))
+        return name, Web3.to_checksum_address(addr)
+    return None
+
+
+_REVIEWERS = {
+    "inspector": _reviewer_entry(config.INSPECTOR_ACCOUNT, _INSPECTOR_KEYS),
+    "owner": _reviewer_entry(config.OWNER_ACCOUNT, _OWNER_KEYS),
 }
+WALLET_SIGNING = config.REVIEWER_SIGNING != "server"
+
+_NAME_BY_ADDRESS = {acc.address.lower(): name for name, acc in _ADMIN_ACCOUNTS.items()}
+for _entry in _REVIEWERS.values():
+    if _entry:
+        _NAME_BY_ADDRESS[_entry[1].lower()] = _entry[0]
 _NAME_BY_ADDRESS[DEVICE_ADDRESS.lower()] = "게이트 기기"
 
 
@@ -57,12 +77,19 @@ def name_for_address(address: str) -> str | None:
 admin_name_for_address = name_for_address
 
 
+def reviewer_info(role: str) -> tuple[str, str] | None:
+    """role = "inspector" | "owner" → (이름, 주소). 지갑 모드에서도 주소는 안다."""
+    if role not in _REVIEWERS:
+        raise ValueError(f"unknown reviewer role: {role}")
+    return _REVIEWERS[role]
+
+
 def reviewer_account(role: str) -> tuple[str, Account]:
-    """role = "inspector" | "owner" → (이름, 계정)"""
-    group = {"inspector": _INSPECTOR, "owner": _OWNER}.get(role)
-    if not group:
-        raise ValueError(f"unknown reviewer role or signer not configured: {role}")
-    name, acc = next(iter(group.items()))
+    """server 모드(백업)에서만: role → (이름, 키 계정). 지갑 모드에서는 백엔드가 감리·발주처 키를 갖지 않는다."""
+    keys = {"inspector": _INSPECTOR_KEYS, "owner": _OWNER_KEYS}.get(role)
+    if not keys:
+        raise ValueError(f"no server-side key for {role} (REVIEWER_SIGNING=wallet: sign with the reviewer's wallet)")
+    name, acc = next(iter(keys.items()))
     return name, acc
 
 
@@ -133,6 +160,14 @@ CASE_ACTION_TYPES = {
         {"name": "reasonCode", "type": "uint8"},
         {"name": "nonce", "type": "bytes32"},
         {"name": "timestamp", "type": "uint64"},
+    ],
+}
+
+SIGNER_APPROVAL_TYPES = {
+    "SignerApproval": [
+        {"name": "proposalId", "type": "uint256"},
+        {"name": "role", "type": "bytes32"},
+        {"name": "account", "type": "address"},
     ],
 }
 
@@ -207,6 +242,33 @@ def _domain():
 def _sign(types: dict, message: dict, account) -> bytes:
     typed = encode_typed_data(domain_data=_domain(), message_types=types, message_data=message)
     return account.sign_message(typed).signature
+
+
+def typed_data(types: dict, message: dict) -> dict:
+    """지갑(eth_signTypedData_v4)에 그대로 넘길 EIP-712 데이터. bytes는 0x hex 문자열로."""
+    primary = next(iter(types))
+    return {
+        "domain": _domain(),
+        "types": types,
+        "primaryType": primary,
+        "message": {k: (to_hex0x(v) if isinstance(v, bytes) else v) for k, v in message.items()},
+    }
+
+
+def message_from_json(types: dict, raw: dict) -> dict:
+    """typed_data()로 내려보낸 message를 다시 서명 검증·제출용 타입으로 되돌린다."""
+    out = {}
+    for f in next(iter(types.values())):
+        v = raw[f["name"]]
+        if f["type"] == "bytes32":
+            out[f["name"]] = from_hex0x(v)
+        elif f["type"] == "address":
+            out[f["name"]] = Web3.to_checksum_address(v)
+        elif f["type"] == "bool":
+            out[f["name"]] = bool(v)
+        else:
+            out[f["name"]] = int(v)
+    return out
 
 
 def recover(types: dict, message: dict, signature: bytes) -> str:
@@ -322,18 +384,20 @@ def build_and_sign_site_record(
 # ----------------------------------------------------------------------
 
 
-def build_and_sign_emergency(case_id, site_id, worker_id, reason_code, nonce, supervisor_name, reviewer_role) -> dict:
+def build_emergency_with_supervisor(case_id, site_id, worker_id, reason_code, nonce, supervisor_name) -> dict:
+    """감독자(시공사) 서명까지만 만든다. 감리·발주처 서명은 각자 지갑에서 받아야 한다."""
     message = {
         "caseId": case_id, "siteId": site_id, "workerId": worker_id,
         "reasonCode": reason_code, "nonce": nonce, "timestamp": _now(),
     }
     supervisor = supervisor_account(supervisor_name)
-    _, reviewer = reviewer_account(reviewer_role)  # 데모에서만 백엔드가 감리·발주처 키를 갖고 있음
-    return {
-        "entry": message,
-        "supervisorSig": _sign(EMERGENCY_TYPES, message, supervisor),
-        "reviewerSig": _sign(EMERGENCY_TYPES, message, reviewer),
-    }
+    return {"entry": message, "supervisorSig": _sign(EMERGENCY_TYPES, message, supervisor)}
+
+
+def server_sign(types: dict, message: dict, reviewer_role: str) -> bytes:
+    """server 모드(백업)에서만: 백엔드가 감리·발주처 키로 대신 서명한다."""
+    _, reviewer = reviewer_account(reviewer_role)
+    return _sign(types, message, reviewer)
 
 
 def submit_emergency(message: dict, supervisor_sig: bytes, reviewer_sig: bytes) -> str:
@@ -368,10 +432,8 @@ def submit_site_record(record: dict, signature: bytes) -> str:
 # ----------------------------------------------------------------------
 
 
-def build_and_sign_case_action(
-    case_id: bytes, scope_hash: bytes, action: int, reason_code: int, nonce: bytes, account
-) -> dict:
-    message = {
+def case_action_message(case_id: bytes, scope_hash: bytes, action: int, reason_code: int, nonce: bytes) -> dict:
+    return {
         "caseId": case_id,
         "scopeHash": scope_hash,
         "action": action,
@@ -379,6 +441,12 @@ def build_and_sign_case_action(
         "nonce": nonce,
         "timestamp": _now(),
     }
+
+
+def build_and_sign_case_action(
+    case_id: bytes, scope_hash: bytes, action: int, reason_code: int, nonce: bytes, account
+) -> dict:
+    message = case_action_message(case_id, scope_hash, action, reason_code, nonce)
     return {
         "action": message,
         "signature": _sign(CASE_ACTION_TYPES, message, account),
@@ -489,15 +557,35 @@ def revoke_signer(role: str, address: str, reason_code: int) -> str:
     return _send(contract.functions.revokeSigner(ROLE_IDS[role], Web3.to_checksum_address(address), reason_code))
 
 
-def register_signer(role: str, address: str) -> str:
-    """시공사 제안 + 감리 승인 서명. 데모에서만 백엔드가 감리 키로 승인 서명까지 한다."""
-    account = Web3.to_checksum_address(address)
-    _send(contract.functions.proposeSigner(ROLE_IDS[role], account))
-    proposal_id = contract.functions.proposalCount().call() - 1
-    digest = contract.functions.signerApprovalDigest(proposal_id).call()
-    _, inspector = reviewer_account("inspector")
-    sig = inspector.unsafe_sign_hash(digest).signature
-    return _send(contract.functions.approveSigner(proposal_id, sig))
+def propose_signer(role: str, address: str) -> int:
+    """시공사 제안. 승인 전까지는 아무 권한도 없다. 반환: 제안 번호."""
+    _send(contract.functions.proposeSigner(ROLE_IDS[role], Web3.to_checksum_address(address)))
+    return contract.functions.proposalCount().call() - 1
+
+
+def signer_approval_message(proposal_id: int) -> dict:
+    role, account, _proposer, executed, _by = contract.functions.getProposal(proposal_id).call()
+    return {"proposalId": proposal_id, "role": role, "account": account, "executed": executed}
+
+
+def approve_signer(proposal_id: int, signature: bytes) -> str:
+    """감리 또는 발주처가 서명한 승인을 제출한다 (누가 제출하든 서명자가 기준)."""
+    return _send(contract.functions.approveSigner(proposal_id, signature))
+
+
+def list_pending_proposals() -> list[dict]:
+    out = []
+    for pid in range(contract.functions.proposalCount().call()):
+        role, account, proposer, executed, _by = contract.functions.getProposal(pid).call()
+        if not executed:
+            out.append({
+                "proposalId": pid,
+                "role": ROLE_NAMES.get(role, to_hex0x(role)),
+                "account": account,
+                "accountName": name_for_address(account) or account,
+                "typedData": typed_data(SIGNER_APPROVAL_TYPES, {"proposalId": pid, "role": role, "account": account}),
+            })
+    return out
 
 
 def get_case_state(case_id: bytes) -> dict:

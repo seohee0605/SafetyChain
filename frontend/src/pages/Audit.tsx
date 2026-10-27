@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Card, ErrorText, Input, PageTitle, SecondaryButton, Select } from '../components/ui'
 import { AUDIT_URL, BACKEND_URL } from '../config'
+import { shortAddr, signTyped, type TypedData } from '../wallet'
 
 // 감리가 보는 화면. 시공사 백엔드가 아니라 감리 감사 저장소(게이트가 직접 보낸 원본)와 체인을 대조한다.
 type AuditState = 'anchored' | 'pending' | 'missing' | 'replaced' | 'mismatch'
@@ -192,6 +193,8 @@ export default function Audit() {
               )}
             </Card>
           )}
+
+          <PendingSignatures site={loadedSite ?? siteId} onDone={() => loadedSite && load(loadedSite)} />
 
           <Card>
             <p className="font-display font-bold uppercase tracking-wide text-charcoal">긴급·장비 장애 예외 출입</p>
@@ -409,6 +412,20 @@ function DemoTools({ onChanged }: { onChanged: () => void }) {
     if (await post('/demo/relay', { mode: next }, '릴레이 설정을 바꿨습니다')) setMode(next)
   }
 
+  async function register() {
+    setMessage(null)
+    const res = await fetch(`${BACKEND_URL}/signers/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'device' }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) setMessage(data.detail ?? '요청 실패')
+    else if (data.pendingApproval) setMessage('시공사가 재등록을 제안했습니다. 위 "지갑 서명 대기"에서 감리·발주처가 승인해야 등록됩니다')
+    else setMessage('게이트 기기를 다시 등록했습니다 (백업 모드: 서버가 감리 키로 승인)')
+    onChanged()
+  }
+
   if (!enabled) return null
 
   const modes: { key: RelayMode; label: string }[] = [
@@ -454,7 +471,7 @@ function DemoTools({ onChanged }: { onChanged: () => void }) {
               기기 해제
             </SecondaryButton>
             <button
-              onClick={() => post('/signers/register', { role: 'device' }, '게이트 기기를 다시 등록했습니다 (감리 승인 서명)')}
+              onClick={register}
               className="px-3 py-1.5 border-2 border-charcoal bg-white font-semibold"
             >
               재등록
@@ -464,5 +481,106 @@ function DemoTools({ onChanged }: { onChanged: () => void }) {
         {message && <p className="text-xs font-semibold text-ink">{message}</p>}
       </div>
     </details>
+  )
+}
+
+type Proposal = { proposalId: number; role: string; account: string; accountName: string; typedData: TypedData }
+type PendingEmergency = { nonce: string; createdAt: number; supervisor: string; reason: string | null; typedData: TypedData }
+
+// 감리·발주처가 자기 지갑으로 서명할 일: 서명자(게이트 기기·감독자) 등록 승인, 예외 출입 공동 서명.
+// 서버는 서명할 내용만 내려주고, 서명은 지갑에서 만들어진다.
+function PendingSignatures({ site, onDone }: { site: string; onDone: () => void }) {
+  const [proposals, setProposals] = useState<Proposal[]>([])
+  const [emergencies, setEmergencies] = useState<PendingEmergency[]>([])
+  const [busy, setBusy] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      const [p, e] = await Promise.all([
+        fetch(`${BACKEND_URL}/signers/proposals`).then((r) => (r.ok ? r.json() : [])),
+        fetch(`${BACKEND_URL}/gate/emergency/pending/${encodeURIComponent(site)}`).then((r) => (r.ok ? r.json() : [])),
+      ])
+      setProposals(p)
+      setEmergencies(e)
+    } catch {
+      // 시공사 백엔드가 꺼져 있어도 감사 화면은 그대로 보인다
+    }
+  }, [site])
+
+  useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, 4000)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  async function sign(key: string, typedData: TypedData, path: string, body: (sig: string) => object, done: string) {
+    setBusy(key)
+    setMessage(null)
+    try {
+      const { address, signature } = await signTyped(typedData)
+      const res = await fetch(`${BACKEND_URL}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body(signature)),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail ?? '제출 실패')
+      setMessage(`${done} · 서명 지갑 ${shortAddr(address)}`)
+      await refresh()
+      onDone()
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : '서명 실패')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (proposals.length === 0 && emergencies.length === 0 && !message) return null
+
+  return (
+    <Card>
+      <div className="flex flex-wrap justify-between items-baseline gap-2">
+        <p className="font-display font-bold uppercase tracking-wide text-charcoal">지갑 서명 대기</p>
+        <span className="text-xs text-ink-muted">감리 또는 발주처 지갑으로 서명 · 가스비는 시공사 부담</span>
+      </div>
+      <div className="divide-y-2 divide-charcoal/10">
+        {proposals.map((p) => (
+          <div key={`p${p.proposalId}`} className="flex flex-wrap items-center justify-between gap-3 py-2.5 text-sm">
+            <span className="text-ink">
+              {p.role === 'device' ? '게이트 기기' : '감독자'} 등록 승인 요청 · {p.accountName === p.account ? shortAddr(p.account) : p.accountName}
+              <span className="block text-xs text-ink-muted">시공사가 제안했고, 감리·발주처가 승인해야 서명 권한이 생깁니다</span>
+            </span>
+            <SecondaryButton
+              disabled={busy !== null}
+              onClick={() =>
+                sign(`p${p.proposalId}`, p.typedData, '/signers/approve', (signature) => ({ proposalId: p.proposalId, signature }), '등록을 승인했습니다')
+              }
+            >
+              {busy === `p${p.proposalId}` ? '지갑 서명 대기...' : '지갑으로 승인'}
+            </SecondaryButton>
+          </div>
+        ))}
+        {emergencies.map((e) => (
+          <div key={e.nonce} className="flex flex-wrap items-center justify-between gap-3 py-2.5 text-sm">
+            <span className="text-ink">
+              예외 출입 공동 서명 요청 · {e.reason}
+              <span className="block text-xs text-ink-muted">
+                감독자 {e.supervisor} 서명 완료 · {new Date(e.createdAt * 1000).toLocaleTimeString()} 요청 (1시간 안에 서명)
+              </span>
+            </span>
+            <SecondaryButton
+              disabled={busy !== null}
+              onClick={() =>
+                sign(e.nonce, e.typedData, '/gate/emergency/cosign', (signature) => ({ nonce: e.nonce, signature }), '예외 출입을 공동 서명했습니다')
+              }
+            >
+              {busy === e.nonce ? '지갑 서명 대기...' : '지갑으로 공동 서명'}
+            </SecondaryButton>
+          </div>
+        ))}
+      </div>
+      {message && <p className="text-xs font-semibold text-ink">{message}</p>}
+    </Card>
   )
 }

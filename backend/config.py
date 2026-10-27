@@ -55,10 +55,15 @@ def _parse_admin_signers(raw: str) -> dict[str, str]:
 
 ADMIN_SIGNERS = _parse_admin_signers(os.environ.get("ADMIN_SIGNERS", ""))
 
-# 감리·발주처 서명 키 ("이름:0x키" 1개씩). 데모에서만 백엔드가 보관한다.
-# 실제 서비스에서는 각 기관이 자기 키로 서명한 값만 보낸다.
-INSPECTOR_SIGNER = _parse_admin_signers(os.environ.get("INSPECTOR_SIGNER", ""))
-OWNER_SIGNER = _parse_admin_signers(os.environ.get("OWNER_SIGNER", ""))
+# 감리·발주처 서명 방식.
+#   wallet (기본): 감리·발주처가 자기 지갑(MetaMask)으로 서명하고, 백엔드는 서명을 체인에 전달만 한다.
+#                  백엔드는 감리·발주처 키를 갖지 않고 주소만 안다 (INSPECTOR_ACCOUNT / OWNER_ACCOUNT, "이름:0x주소").
+#   server (백업): 데모 장애 대비. 백엔드가 INSPECTOR_SIGNER / OWNER_SIGNER ("이름:0x키")로 대신 서명한다.
+REVIEWER_SIGNING = os.environ.get("REVIEWER_SIGNING", "wallet").strip().lower()
+INSPECTOR_ACCOUNT = _parse_admin_signers(os.environ.get("INSPECTOR_ACCOUNT", ""))
+OWNER_ACCOUNT = _parse_admin_signers(os.environ.get("OWNER_ACCOUNT", ""))
+INSPECTOR_SIGNER = _parse_admin_signers(os.environ.get("INSPECTOR_SIGNER", "")) if REVIEWER_SIGNING == "server" else {}
+OWNER_SIGNER = _parse_admin_signers(os.environ.get("OWNER_SIGNER", "")) if REVIEWER_SIGNING == "server" else {}
 
 
 def _load_pseudonym_key() -> bytes:

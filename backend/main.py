@@ -562,14 +562,36 @@ def list_admins():
 
 @app.get("/reviewers")
 def list_reviewers():
+    """감리·발주처 이름과 주소. 지갑 모드에서는 백엔드가 이들의 키를 갖고 있지 않다."""
     out = []
     for role in ("inspector", "owner"):
-        try:
-            name, acc = chain.reviewer_account(role)
-            out.append({"role": role, "name": name, "address": acc.address})
-        except ValueError:
-            pass
+        info = chain.reviewer_info(role)
+        if info:
+            out.append({"role": role, "name": info[0], "address": info[1]})
     return out
+
+
+@app.get("/signing-mode")
+def signing_mode():
+    """wallet: 감리·발주처가 자기 지갑으로 서명 / server: 데모 백업용으로 백엔드가 대신 서명."""
+    return {"mode": "wallet" if chain.WALLET_SIGNING else "server", "reviewers": list_reviewers()}
+
+
+def _require_server_signing() -> None:
+    if chain.WALLET_SIGNING:
+        raise HTTPException(409, "reviewer must sign with their own wallet (use the /prepare + /submit endpoints)")
+
+
+def _check_wallet_signer(types: dict, message: dict, signature: bytes, roles: tuple[str, ...]) -> str:
+    """지갑 서명이 정말 감리·발주처 주소에서 나왔는지 먼저 확인한다 (최종 판단은 컨트랙트가 역할로 한다)."""
+    try:
+        signer = chain.recover(types, message, signature)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"invalid signature: {e}")
+    allowed = {chain.reviewer_info(r)[1].lower(): r for r in roles if chain.reviewer_info(r)}
+    if signer.lower() not in allowed:
+        raise HTTPException(403, f"connected wallet {signer} is not the expected reviewer")
+    return signer
 
 
 def _site_record_content(process_summary: str, hazards: list[dict], change_reason: str | None) -> str:
@@ -767,13 +789,62 @@ class CaseReviewRequest(BaseModel):
     reasonCode: int = 0  # 반려일 때 필수
 
 
-@app.post("/case/review")
-def review_case(req: CaseReviewRequest):
-    """감리 또는 발주처의 승인/반려. 어느 역할이 서명할 차례인지는 컨트랙트가 강제한다."""
+def _case_review_message(req: CaseReviewRequest) -> tuple[bytes, dict]:
     if req.decision not in ("approve", "reject"):
         raise HTTPException(400, "decision must be approve or reject")
     if req.decision == "reject" and req.reasonCode not in REJECT_REASONS:
         raise HTTPException(400, "reject requires a valid reasonCode")
+    if req.reviewer not in ("inspector", "owner"):
+        raise HTTPException(400, "reviewer must be inspector or owner")
+    case_id = chain.case_id_hash(req.siteId, req.workDate)
+    state = chain.get_case_state(case_id)
+    submission = db.latest_case_submission(chain.to_hex0x(case_id))
+    if submission is None:
+        raise HTTPException(400, "case not submitted yet")
+    if chain.to_hex0x(chain.hash_text(submission["scope_json"])) != state["scopeHash"]:
+        raise HTTPException(409, "submitted scope does not match chain")
+    action = chain.ACTION_APPROVE if req.decision == "approve" else chain.ACTION_REJECT
+    reason = req.reasonCode if action == chain.ACTION_REJECT else 0
+    # 제출된 범위(온체인 scopeHash) 그대로 승인/반려한다
+    message = chain.case_action_message(case_id, chain.from_hex0x(state["scopeHash"]), action, reason,
+                                        secrets.token_bytes(32))
+    return case_id, message
+
+
+@app.post("/case/review/prepare")
+def review_case_prepare(req: CaseReviewRequest):
+    """감리·발주처 지갑이 서명할 EIP-712 데이터를 만든다. 서버는 서명하지 않는다."""
+    _, message = _case_review_message(req)
+    nonce = chain.to_hex0x(message["nonce"])
+    typed = chain.typed_data(chain.CASE_ACTION_TYPES, message)
+    db.save_pending(nonce, "case_review", req.siteId, json.dumps({"message": typed["message"], "reviewer": req.reviewer}))
+    return {"nonce": nonce, "typedData": typed}
+
+
+class SignatureSubmit(BaseModel):
+    nonce: str
+    signature: str
+
+
+@app.post("/case/review/submit")
+def review_case_submit(req: SignatureSubmit):
+    """지갑 서명을 받아 체인에 전달한다. 서명 대상은 서버가 prepare 때 보관한 원문 그대로다."""
+    pending = db.get_pending(req.nonce)
+    if pending is None or pending["kind"] != "case_review" or pending["done"]:
+        raise HTTPException(404, "no pending case review for this nonce")
+    payload = json.loads(pending["payload_json"])
+    message = chain.message_from_json(chain.CASE_ACTION_TYPES, payload["message"])
+    sig = chain.from_hex0x(req.signature)
+    signer = _check_wallet_signer(chain.CASE_ACTION_TYPES, message, sig, (payload["reviewer"],))
+    result = _submit_case_action(message, sig, signer, None)
+    db.mark_pending_done(req.nonce)
+    return result
+
+
+@app.post("/case/review")
+def review_case(req: CaseReviewRequest):
+    """(server 모드 백업) 감리 또는 발주처의 승인/반려를 백엔드 키로 대신 서명한다."""
+    _require_server_signing()
     try:
         _, account = chain.reviewer_account(req.reviewer)
     except ValueError as e:
@@ -796,22 +867,27 @@ def review_case(req: CaseReviewRequest):
 def _do_case_action(case_id: bytes, scope_hash: bytes, action: int, reason: int, account, scope_json):
     nonce = secrets.token_bytes(32)
     signed = chain.build_and_sign_case_action(case_id, scope_hash, action, reason, nonce, account)
+    return _submit_case_action(signed["action"], signed["signature"], signed["signerAddress"], scope_json)
+
+
+def _submit_case_action(message: dict, signature: bytes, signer_address: str, scope_json):
     try:
-        tx_hash = chain.submit_case_action(signed["action"], signed["signature"])
+        tx_hash = chain.submit_case_action(message, signature)
     except ONCHAIN_ERRORS as e:
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
 
+    case_id = message["caseId"]
     db.record_case_action(
-        nonce=chain.to_hex0x(nonce),
+        nonce=chain.to_hex0x(message["nonce"]),
         case_id=chain.to_hex0x(case_id),
-        action=action,
-        reason_code=reason,
-        scope_hash=chain.to_hex0x(scope_hash),
+        action=message["action"],
+        reason_code=message["reasonCode"],
+        scope_hash=chain.to_hex0x(message["scopeHash"]),
         scope_json=scope_json,
-        signer_address=signed["signerAddress"],
-        signature=chain.to_hex0x(signed["signature"]),
+        signer_address=signer_address,
+        signature=chain.to_hex0x(signature),
         tx_hash=tx_hash,
-        timestamp=signed["action"]["timestamp"],
+        timestamp=message["timestamp"],
     )
     return {"txHash": tx_hash, "caseId": chain.to_hex0x(case_id), "state": chain.get_case_state(case_id)}
 
@@ -912,7 +988,8 @@ class RegisterRequest(BaseModel):
 
 @app.post("/signers/register")
 def register_signer(req: RegisterRequest):
-    """시연용 재등록: 시공사 제안 + 감리 승인 서명 (데모에서만 백엔드가 감리 키를 갖고 있음)."""
+    """시공사 제안. wallet 모드에서는 제안만 하고, 감리·발주처가 감리 화면에서 지갑으로 승인해야 등록된다.
+    server 모드(백업)에서는 백엔드가 감리 키로 승인까지 한다."""
     _require_demo_controls()
     if req.role not in chain.ROLE_IDS:
         raise HTTPException(400, "role must be device or supervisor")
@@ -920,10 +997,43 @@ def register_signer(req: RegisterRequest):
     if chain.has_role(req.role, address):
         raise HTTPException(400, "already registered")
     try:
-        tx_hash = chain.register_signer(req.role, address)
+        proposal_id = chain.propose_signer(req.role, address)
+        if chain.WALLET_SIGNING:
+            return {"proposalId": proposal_id, "pendingApproval": True}
+        msg = chain.signer_approval_message(proposal_id)
+        sig = chain.server_sign(chain.SIGNER_APPROVAL_TYPES, {k: msg[k] for k in ("proposalId", "role", "account")},
+                                "inspector")
+        return {"proposalId": proposal_id, "txHash": chain.approve_signer(proposal_id, sig)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except ONCHAIN_ERRORS as e:
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
-    return {"txHash": tx_hash}
+
+
+@app.get("/signers/proposals")
+def signer_proposals():
+    """감리·발주처 승인을 기다리는 서명자 등록 제안 (+ 지갑이 서명할 EIP-712 데이터)."""
+    return chain.list_pending_proposals()
+
+
+class ApproveRequest(BaseModel):
+    proposalId: int
+    signature: str
+
+
+@app.post("/signers/approve")
+def approve_signer(req: ApproveRequest):
+    """감리·발주처의 지갑 승인 서명을 체인에 전달한다. 누가 제출하든 컨트랙트는 서명자로 판단한다."""
+    msg = chain.signer_approval_message(req.proposalId)
+    if msg["executed"]:
+        raise HTTPException(400, "proposal already approved")
+    sig = chain.from_hex0x(req.signature)
+    _check_wallet_signer(chain.SIGNER_APPROVAL_TYPES, {k: msg[k] for k in ("proposalId", "role", "account")}, sig,
+                         ("inspector", "owner"))
+    try:
+        return {"txHash": chain.approve_signer(req.proposalId, sig)}
+    except ONCHAIN_ERRORS as e:
+        raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
 
 
 class RelayModeRequest(BaseModel):
@@ -967,41 +1077,101 @@ class EmergencyRequest(BaseModel):
     workerId: str
     reasonCode: int
     supervisorName: str
-    reviewer: str = "inspector"  # 함께 서명할 기관: inspector(감리) | owner(발주처)
+    reviewer: str = "inspector"  # server 모드에서 함께 서명할 기관: inspector(감리) | owner(발주처)
     workDate: str | None = None
 
 
-@app.post("/gate/emergency")
-def emergency_entry(req: EmergencyRequest):
-    """게이트 고장·응급 상황 등으로 정상 검사를 못 할 때의 별도 절차.
-    감독자 혼자서는 기록할 수 없고 감리(또는 발주처) 서명이 같이 있어야 체인이 받는다."""
+def _emergency_message(req: EmergencyRequest) -> dict:
     if req.reasonCode not in EMERGENCY_REASONS:
         raise HTTPException(400, "unknown reasonCode")
     if req.supervisorName not in chain.ADMIN_NAMES:
         raise HTTPException(400, "unknown supervisorName")
-    if req.reviewer not in ("inspector", "owner"):
-        raise HTTPException(400, "reviewer must be inspector or owner")
     work_date = req.workDate or _default_work_date()
-    nonce = secrets.token_bytes(32)
+    return chain.build_emergency_with_supervisor(
+        chain.case_id_hash(req.siteId, work_date), chain.site_id_hash(req.siteId),
+        chain.worker_id_hash(req.workerId, req.siteId, work_date), req.reasonCode, secrets.token_bytes(32),
+        req.supervisorName,
+    )
+
+
+def _submit_emergency(entry: dict, supervisor_sig: bytes, reviewer_sig: bytes, site_id: str, worker_id: str):
+    nonce = entry["nonce"]
     try:
-        signed = chain.build_and_sign_emergency(
-            chain.case_id_hash(req.siteId, work_date), chain.site_id_hash(req.siteId),
-            chain.worker_id_hash(req.workerId, req.siteId, work_date), req.reasonCode, nonce,
-            req.supervisorName, req.reviewer,
-        )
-        tx_hash = chain.submit_emergency(signed["entry"], signed["supervisorSig"], signed["reviewerSig"])
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+        tx_hash = chain.submit_emergency(entry, supervisor_sig, reviewer_sig)
     except ONCHAIN_ERRORS as e:
-        db.record_rejection("emergency", chain.to_hex0x(nonce), req.siteId, chain.describe_error(e))
+        db.record_rejection("emergency", chain.to_hex0x(nonce), site_id, chain.describe_error(e))
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
     stored = chain.contract.functions.getEmergencyEntry(nonce).call()
     db.record_emergency(
-        nonce=chain.to_hex0x(nonce), case_id=chain.to_hex0x(signed["entry"]["caseId"]), site_id=req.siteId,
-        worker_id=req.workerId, reason_code=req.reasonCode, supervisor_address=stored[1],
-        approver_address=stored[2], tx_hash=tx_hash, timestamp=signed["entry"]["timestamp"],
+        nonce=chain.to_hex0x(nonce), case_id=chain.to_hex0x(entry["caseId"]), site_id=site_id,
+        worker_id=worker_id, reason_code=entry["reasonCode"], supervisor_address=stored[1],
+        approver_address=stored[2], tx_hash=tx_hash, timestamp=entry["timestamp"],
     )
-    return {"txHash": tx_hash, "nonce": chain.to_hex0x(nonce), "reason": EMERGENCY_REASONS[req.reasonCode]}
+    return {"txHash": tx_hash, "nonce": chain.to_hex0x(nonce), "reason": EMERGENCY_REASONS[entry["reasonCode"]],
+            "approver": chain.name_for_address(stored[2]) or stored[2]}
+
+
+@app.post("/gate/emergency/request")
+def emergency_request(req: EmergencyRequest):
+    """게이트 고장·응급 상황 등으로 정상 검사를 못 할 때: 감독자(시공사)가 먼저 서명해 요청을 올린다.
+    감리 또는 발주처가 자기 지갑으로 공동 서명해야 체인에 기록된다 (감독자 혼자서는 불가)."""
+    signed = _emergency_message(req)
+    entry = signed["entry"]
+    nonce = chain.to_hex0x(entry["nonce"])
+    typed = chain.typed_data(chain.EMERGENCY_TYPES, entry)
+    db.save_pending(nonce, "emergency", req.siteId, json.dumps({
+        "message": typed["message"], "supervisorSig": chain.to_hex0x(signed["supervisorSig"]),
+        "workerId": req.workerId, "supervisorName": req.supervisorName,
+    }))
+    return {"nonce": nonce, "typedData": typed, "reason": EMERGENCY_REASONS[req.reasonCode]}
+
+
+@app.get("/gate/emergency/pending/{site}")
+def emergency_pending(site: str):
+    """공동 서명을 기다리는 예외 출입 요청. 서명 유효 시간(1시간) 안의 것만."""
+    since = int(time.time()) - 55 * 60
+    out = []
+    for p in db.list_pending("emergency", since):
+        if p["site_id"] != site:
+            continue
+        payload = json.loads(p["payload_json"])
+        out.append({
+            "nonce": p["nonce"], "createdAt": p["created_at"], "supervisor": payload["supervisorName"],
+            "reason": EMERGENCY_REASONS.get(payload["message"]["reasonCode"]),
+            "typedData": chain.typed_data(chain.EMERGENCY_TYPES, chain.message_from_json(chain.EMERGENCY_TYPES,
+                                                                                         payload["message"])),
+        })
+    return out
+
+
+@app.post("/gate/emergency/cosign")
+def emergency_cosign(req: SignatureSubmit):
+    """감리 또는 발주처의 지갑 서명을 받아 감독자 서명과 함께 체인에 제출한다."""
+    pending = db.get_pending(req.nonce)
+    if pending is None or pending["kind"] != "emergency" or pending["done"]:
+        raise HTTPException(404, "no pending emergency request for this nonce")
+    payload = json.loads(pending["payload_json"])
+    entry = chain.message_from_json(chain.EMERGENCY_TYPES, payload["message"])
+    sig = chain.from_hex0x(req.signature)
+    _check_wallet_signer(chain.EMERGENCY_TYPES, entry, sig, ("inspector", "owner"))
+    result = _submit_emergency(entry, chain.from_hex0x(payload["supervisorSig"]), sig, pending["site_id"],
+                               payload["workerId"])
+    db.mark_pending_done(req.nonce)
+    return result
+
+
+@app.post("/gate/emergency")
+def emergency_entry(req: EmergencyRequest):
+    """(server 모드 백업) 감독자 서명 + 백엔드가 가진 감리·발주처 키로 공동 서명까지 한 번에."""
+    _require_server_signing()
+    if req.reviewer not in ("inspector", "owner"):
+        raise HTTPException(400, "reviewer must be inspector or owner")
+    signed = _emergency_message(req)
+    try:
+        reviewer_sig = chain.server_sign(chain.EMERGENCY_TYPES, signed["entry"], req.reviewer)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _submit_emergency(signed["entry"], signed["supervisorSig"], reviewer_sig, req.siteId, req.workerId)
 
 
 @app.get("/emergencies/{site}")

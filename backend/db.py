@@ -84,6 +84,17 @@ CREATE TABLE IF NOT EXISTS emergencies (
     timestamp INTEGER NOT NULL
 );
 
+-- 감리·발주처 지갑 서명을 기다리는 요청 (예외 출입 공동 서명, 케이스 승인·반려).
+-- 서버가 만든 서명 대상 원문을 그대로 보관해 두고, 지갑 서명이 오면 이 원문으로만 체인에 제출한다.
+CREATE TABLE IF NOT EXISTS pending_signatures (
+    nonce TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,               -- emergency | case_review
+    site_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0
+);
+
 -- 사고 조사용 열람 기록 (가명 → 사번 확인, 검사 사진 열람). 누가·언제·왜 봤는지
 CREATE TABLE IF NOT EXISTS access_log (
     kind TEXT NOT NULL,
@@ -527,3 +538,29 @@ def log_access(kind: str, nonce: str, investigator: str, reason: str) -> None:
 def list_access_log(limit: int = 200) -> list[sqlite3.Row]:
     with get_conn() as conn:
         return conn.execute("SELECT * FROM access_log ORDER BY at DESC LIMIT ?", (limit,)).fetchall()
+
+
+def save_pending(nonce: str, kind: str, site_id: str, payload_json: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO pending_signatures (nonce, kind, site_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (nonce, kind, site_id, payload_json, int(time.time())),
+        )
+
+
+def get_pending(nonce: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM pending_signatures WHERE nonce = ?", (nonce,)).fetchone()
+
+
+def list_pending(kind: str, since: int) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM pending_signatures WHERE kind = ? AND done = 0 AND created_at >= ? ORDER BY created_at DESC",
+            (kind, since),
+        ).fetchall()
+
+
+def mark_pending_done(nonce: str) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE pending_signatures SET done = 1 WHERE nonce = ?", (nonce,))

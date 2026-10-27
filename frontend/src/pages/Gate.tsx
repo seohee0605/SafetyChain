@@ -23,7 +23,7 @@ type GateResult = {
 type Reason = { code: number; label: string }
 type Admin = { name: string; address: string }
 type OverrideResult = { txHash: string; reason: string }
-type EmergencyResult = { txHash: string; reason: string }
+type EmergencyResult = { reason: string; pending: boolean }
 type Stage = 'inspecting' | 'signing' | 'auditing' | 'anchoring' | 'confirmed' | 'not_anchored'
 
 const STAGES: { key: Stage; label: string }[] = [
@@ -73,6 +73,7 @@ export default function Gate() {
   const [emergencyReviewer, setEmergencyReviewer] = useState<'inspector' | 'owner'>('inspector')
   const [emergencyResult, setEmergencyResult] = useState<EmergencyResult | null>(null)
   const [emergencyError, setEmergencyError] = useState<string | null>(null)
+  const [signingMode, setSigningMode] = useState<'wallet' | 'server'>('wallet')
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -87,6 +88,10 @@ export default function Gate() {
         setReasons(r.override)
         setEmergencyReasons(r.emergency ?? [])
       })
+      .catch(() => {})
+    fetch(`${BACKEND_URL}/signing-mode`)
+      .then((res) => res.json())
+      .then((m: { mode: 'wallet' | 'server' }) => setSigningMode(m.mode))
       .catch(() => {})
     fetch(`${BACKEND_URL}/admins`)
       .then((res) => res.json())
@@ -271,14 +276,16 @@ export default function Gate() {
   async function submitEmergency() {
     setEmergencyError(null)
     setEmergencyResult(null)
-    const res = await fetch(`${BACKEND_URL}/gate/emergency`, {
+    // 지갑 모드: 감독자 서명으로 요청만 올린다. 감리·발주처가 감리 화면에서 자기 지갑으로 공동 서명해야 기록된다
+    const path = signingMode === 'wallet' ? '/gate/emergency/request' : '/gate/emergency'
+    const res = await fetch(`${BACKEND_URL}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ siteId, workerId, workDate, reasonCode: emergencyReason, supervisorName, reviewer: emergencyReviewer }),
     })
     const body = await res.json().catch(() => ({}))
-    if (!res.ok) setEmergencyError(body.detail ?? '예외 출입 기록 실패')
-    else setEmergencyResult(body)
+    if (!res.ok) setEmergencyError(body.detail ?? '예외 출입 요청 실패')
+    else setEmergencyResult({ reason: body.reason, pending: signingMode === 'wallet' })
   }
 
   // AI 보호구 불합격을 감독자가 사유 코드와 함께 수동 처리. 원래 판정은 그대로 남고 override 기록이 추가된다
@@ -438,21 +445,25 @@ export default function Gate() {
                 </option>
               ))}
             </Select>
-            <Select
-              value={emergencyReviewer}
-              onChange={(e) => setEmergencyReviewer(e.target.value as 'inspector' | 'owner')}
-              className="flex-1"
-            >
-              <option value="inspector">감리 공동 서명</option>
-              <option value="owner">발주처 공동 서명</option>
-            </Select>
+            {signingMode === 'server' && (
+              <Select
+                value={emergencyReviewer}
+                onChange={(e) => setEmergencyReviewer(e.target.value as 'inspector' | 'owner')}
+                className="flex-1"
+              >
+                <option value="inspector">감리 공동 서명</option>
+                <option value="owner">발주처 공동 서명</option>
+              </Select>
+            )}
           </div>
           <SecondaryButton disabled={!workerId || !siteId || !supervisorName} onClick={submitEmergency}>
-            두 기관 서명으로 예외 출입 기록
+            {signingMode === 'wallet' ? '감독자 서명으로 예외 출입 요청' : '두 기관 서명으로 예외 출입 기록'}
           </SecondaryButton>
           {emergencyResult && (
             <p className="text-sm bg-safety-yellow/20 border-2 border-charcoal p-2.5">
-              예외 출입이 기록됐습니다 · 사유: {emergencyResult.reason}
+              {emergencyResult.pending
+                ? `요청을 올렸습니다 · 사유: ${emergencyResult.reason}. 감리 또는 발주처가 감리 감사 화면에서 자기 지갑으로 공동 서명하면 기록됩니다 (1시간 안)`
+                : `예외 출입이 기록됐습니다 · 사유: ${emergencyResult.reason}`}
             </p>
           )}
           {emergencyError && <ErrorText>{emergencyError}</ErrorText>}

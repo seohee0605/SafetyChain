@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import Audit from './pages/Audit'
 import CaseReview from './pages/CaseReview'
 import Dashboard from './pages/Dashboard'
 import Gate from './pages/Gate'
@@ -11,6 +12,7 @@ const PAGES = {
   siteRecord: { label: '위험성평가', component: SiteRecord },
   caseReview: { label: '케이스 검토', component: CaseReview },
   dashboard: { label: '대시보드', component: Dashboard },
+  audit: { label: '감리 감사', component: Audit },
   verify: { label: '검증', component: Verify },
   worker: { label: '근로자 앱', component: Worker },
 } as const
@@ -50,12 +52,12 @@ function App() {
           </p>
           <p className="text-sm text-white/60 mt-1.5">현장 안전 검사 결과를 위변조 불가능하게 기록합니다</p>
         </div>
-        <nav className="max-w-3xl mx-auto px-6 flex gap-1">
+        <nav className="max-w-3xl mx-auto px-6 flex gap-1 overflow-x-auto">
           {(Object.keys(PAGES) as PageKey[]).map((key) => (
             <button
               key={key}
               onClick={() => setPage(key)}
-              className={`px-4 py-2.5 text-sm font-display font-bold uppercase tracking-wide border-t-4 transition-colors ${
+              className={`shrink-0 px-4 py-2.5 text-sm font-display font-bold uppercase tracking-wide border-t-4 transition-colors ${
                 page === key
                   ? 'bg-paper text-charcoal border-safety-yellow'
                   : 'text-white/50 border-transparent hover:text-white hover:bg-white/5'

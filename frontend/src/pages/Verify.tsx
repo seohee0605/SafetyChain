@@ -10,6 +10,9 @@ type VerifyData = {
   evidenceIntact: boolean
   modelHashMatch: boolean
   anchoredAt?: number
+  entryStatus?: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'LateAuditOnly'
+  entryAllowed?: boolean
+  deviceSeq?: number
   overridden?: boolean
   overrideReason?: string | null
   overriddenBy?: string | null
@@ -24,6 +27,13 @@ type SiteVerify = {
 }
 
 type Mode = 'checkin' | 'site'
+
+const ENTRY_LABEL = {
+  Granted: '출입 허가',
+  Denied: '검사 불합격',
+  HeldNoAssessment: '위험성평가 전 보류',
+  LateAuditOnly: '지연 도착 (감사용)',
+}
 
 export default function Verify() {
   const [mode, setMode] = useState<Mode>('checkin')
@@ -109,6 +119,13 @@ export default function Verify() {
           <StatusBadge ok={data.recordMatchesChain} label="서버에 저장된 판정 = 블록체인 기록" />
           <StatusBadge ok={data.evidenceIntact} label="검사 사진 원본이 바뀌지 않음" />
           <StatusBadge ok={data.modelHashMatch} label="판정에 쓴 AI 모델이 그대로임" />
+          {data.entryStatus && (
+            <p className="text-sm text-ink border-2 border-charcoal px-4 py-3">
+              출입 판정: <b>{ENTRY_LABEL[data.entryStatus]}</b>
+              {data.entryAllowed ? ' · 출입 근거로 인정' : ' · 출입 근거 아님'}
+              <span className="text-ink-muted"> · 게이트 기록 #{data.deviceSeq}</span>
+            </p>
+          )}
           {data.anchoredAt ? (
             <p className="text-xs text-ink-muted">
               블록 기록 시각: {new Date(data.anchoredAt * 1000).toLocaleString()} (서명 시각이 아닌 블록 시각 기준)

@@ -2,7 +2,16 @@ import { useState } from 'react'
 import { Card, ErrorText, Input, PageTitle, SecondaryButton } from '../components/ui'
 import { BACKEND_URL } from '../config'
 
-type Daily = { date: string; checked: number; unchecked: number; failed: number; overrides: number; rate: number | null }
+type Daily = {
+  date: string
+  checked: number
+  unchecked: number
+  failed: number
+  overrides: number
+  held: number
+  late: number
+  rate: number | null
+}
 
 type DashboardData = {
   checkedCount: number
@@ -11,6 +20,8 @@ type DashboardData = {
   failedCount: number
   overrideCount: number
   overrideRate: number
+  heldCount: number
+  lateCount: number
   noIncidentDays: number | null
   noIncidentSince: 'incident' | 'firstRecord' | null
   lastIncidentDate: string | null
@@ -112,6 +123,15 @@ export default function Dashboard() {
                 <span className="text-base text-ink-muted ml-2">(불합격의 {pct(data.overrideRate)})</span>
               </span>
             </div>
+            <div className="flex justify-between items-baseline border-t-2 border-charcoal/10 pt-3">
+              <span className="text-ink-muted uppercase font-display tracking-wide text-sm">위험성평가 전 출입 시도 (보류)</span>
+              <span className="text-3xl font-display font-extrabold text-safety-orange">{data.heldCount}건</span>
+            </div>
+            <div className="flex justify-between items-baseline">
+              <span className="text-ink-muted uppercase font-display tracking-wide text-sm">지연 도착 기록 (감사용)</span>
+              <span className="text-3xl font-display font-extrabold text-charcoal">{data.lateCount}건</span>
+            </div>
+            <p className="text-xs text-ink-muted">보류·지연 기록도 검사 건수에는 포함되지만 출입 근거로는 쓰지 않습니다.</p>
           </Card>
 
           <details className="text-sm text-ink-muted">
@@ -146,6 +166,8 @@ function WeekChart({ daily }: { daily: Daily[] }) {
             </div>
             <span className="text-xs text-ink-muted">{d.date.slice(5).replace('-', '/')}</span>
             {d.overrides > 0 && <span className="text-[10px] text-ink-muted">수동 {d.overrides}</span>}
+            {d.held > 0 && <span className="text-[10px] text-safety-orange">보류 {d.held}</span>}
+            {d.late > 0 && <span className="text-[10px] text-ink-muted">지연 {d.late}</span>}
           </div>
         )
       })}

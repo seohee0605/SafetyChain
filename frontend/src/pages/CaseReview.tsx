@@ -16,6 +16,7 @@ type CheckInRow = {
   timestamp: number
   overridden: boolean
   overrideReason: string | null
+  entryStatus: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'LateAuditOnly' | null
 }
 
 type SiteRecordRow = {
@@ -198,9 +199,15 @@ export default function CaseReview() {
                 <div key={c.nonce} className="border-2 border-charcoal/20 p-2.5 mb-2 text-sm">
                   <div className="flex justify-between">
                     <span className="text-ink-muted text-xs">{new Date(c.timestamp * 1000).toLocaleTimeString()} 출입 검사</span>
-                    <span className={allPassed ? 'text-hazard-green font-semibold' : 'text-hazard-red font-semibold'}>
-                      {allPassed ? '통과' : c.overridden ? '불합격 → 수동 승인' : '불합격'}
-                    </span>
+                    {c.entryStatus === 'HeldNoAssessment' ? (
+                      <span className="text-safety-orange font-semibold">위험성평가 전 · 출입 보류</span>
+                    ) : c.entryStatus === 'LateAuditOnly' ? (
+                      <span className="text-ink-muted font-semibold">지연 도착 · 감사용</span>
+                    ) : (
+                      <span className={allPassed ? 'text-hazard-green font-semibold' : 'text-hazard-red font-semibold'}>
+                        {allPassed ? '통과' : c.overridden ? '불합격 → 수동 승인' : '불합격'}
+                      </span>
+                    )}
                   </div>
                   {c.overridden && <p className="text-xs text-ink-muted mt-1">수동 처리 사유: {c.overrideReason}</p>}
                 </div>

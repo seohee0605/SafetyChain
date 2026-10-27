@@ -11,7 +11,7 @@ type QrIssue = { nonce: string; expiresAt: number }
 type RecordRow = {
   nonce: string
   at: number
-  result: 'pass' | 'fail' | 'override'
+  result: 'pass' | 'fail' | 'override' | 'held' | 'late'
   helmetPass: boolean
   shoesPass: boolean
   alcoholPass: boolean
@@ -43,7 +43,11 @@ const RESULT_LABEL = {
   pass: { text: '출입 허용', cls: 'bg-hazard-green text-white' },
   override: { text: '감독자 확인 후 허용', cls: 'bg-safety-yellow text-charcoal' },
   fail: { text: '출입 불가', cls: 'bg-hazard-red text-white' },
+  held: { text: '위험성평가 전 보류', cls: 'bg-safety-orange text-white' },
+  late: { text: '지연 도착 (감사용)', cls: 'bg-ink-muted text-white' },
 }
+
+const RESULT_ICON = { pass: '✓', override: '!', fail: '✕', held: '‖', late: '⧗' }
 
 export default function Worker() {
   const [profile, setProfile] = useState<Profile | null>(loadProfile)
@@ -287,7 +291,7 @@ function EntryQr({ profile }: { profile: Profile }) {
     return (
       <div className="space-y-5 text-center">
         <div className={`py-10 border-2 border-charcoal ${label.cls}`}>
-          <p className="text-6xl font-display font-extrabold">{used.result === 'fail' ? '✕' : used.result === 'override' ? '!' : '✓'}</p>
+          <p className="text-6xl font-display font-extrabold">{RESULT_ICON[used.result]}</p>
           <p className="text-3xl font-display font-extrabold uppercase mt-2">{label.text}</p>
         </div>
         <ItemChips row={used} />

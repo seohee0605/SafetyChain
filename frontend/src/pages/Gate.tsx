@@ -5,23 +5,30 @@ import { Card, ChainLink, ErrorText, Input, PageTitle, SecondaryButton, Select, 
 import { BACKEND_URL } from '../config'
 
 type QrIssue = { nonce: string; expiresAt: number }
+type EntryStatus = 'Granted' | 'Denied' | 'HeldNoAssessment' | 'LateAuditOnly'
 type GateResult = {
-  txHash: string
+  anchored: boolean
+  txHash: string | null
   verdict: boolean
   nonce: string
   helmetPass: boolean
   shoesPass: boolean
   alcoholPass: boolean
   overridable: boolean
+  entryStatus: EntryStatus | null
+  entryAllowed: boolean
+  deviceSeq: number
+  auditDelivered: boolean
 }
 type Reason = { code: number; label: string }
 type Admin = { name: string; address: string }
 type OverrideResult = { txHash: string; reason: string }
-type Stage = 'inspecting' | 'signing' | 'anchoring' | 'confirmed'
+type Stage = 'inspecting' | 'signing' | 'auditing' | 'anchoring' | 'confirmed' | 'not_anchored'
 
 const STAGES: { key: Stage; label: string }[] = [
   { key: 'inspecting', label: '검사 중' },
   { key: 'signing', label: '기기 서명' },
+  { key: 'auditing', label: '감리 감사 저장소 전달' },
   { key: 'anchoring', label: '블록체인 기록 중' },
   { key: 'confirmed', label: '확정' },
 ]
@@ -58,6 +65,8 @@ export default function Gate() {
   const [showOverride, setShowOverride] = useState(false)
   const [overrideResult, setOverrideResult] = useState<OverrideResult | null>(null)
   const [overriding, setOverriding] = useState(false)
+  // 시연: 게이트가 오프라인이라 N분 전에 서명해 둔 기록을 지금 보내는 상황
+  const [delayMinutes, setDelayMinutes] = useState(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -218,6 +227,7 @@ export default function Gate() {
       form.append('workerId', workerId)
       form.append('siteId', siteId)
       form.append('workDate', workDate)
+      if (delayMinutes > 0) form.append('signedMinutesAgo', String(delayMinutes))
 
       const res = await fetch(`${BACKEND_URL}/gate/check/stream`, { method: 'POST', body: form })
       if (!res.ok || !res.body) {
@@ -238,7 +248,7 @@ export default function Gate() {
           const msg = JSON.parse(line)
           if (msg.stage === 'error') throw new Error(msg.detail)
           setStage(msg.stage)
-          if (msg.stage === 'confirmed') setResult(msg.result)
+          if (msg.stage === 'confirmed' || msg.stage === 'not_anchored') setResult(msg.result)
         }
       }
     } catch (e) {
@@ -360,6 +370,20 @@ export default function Gate() {
           />
           측정 통과
         </label>
+        <details className="text-sm text-ink-muted">
+          <summary className="cursor-pointer font-semibold select-none">시연: 늦게 도착한 기록 만들기</summary>
+          <label className="flex items-center gap-2 mt-2">
+            <Input
+              type="number"
+              min={0}
+              max={2880}
+              value={delayMinutes}
+              onChange={(e) => setDelayMinutes(Math.max(0, Number(e.target.value)))}
+              className="w-24"
+            />
+            분 전에 서명해 둔 기록을 지금 전송 (0이면 정상)
+          </label>
+        </details>
       </Card>
 
       <SuccessButton disabled={!scannedNonce || !capturedBlob || stage !== null} onClick={submitCheck} className="w-full text-lg py-4">
@@ -424,23 +448,38 @@ function ResultScreen(props: {
   overridePanel: React.ReactNode
 }) {
   const { stage, result, overrideResult, showOverride, onShowOverride, onNext, error, overridePanel } = props
-  const done = stage === 'confirmed' && result
+  const done = (stage === 'confirmed' || stage === 'not_anchored') && result
   const stageIndex = STAGES.findIndex((s) => s.key === stage)
 
   let tone = 'bg-charcoal text-white'
   let icon = ''
   let title = '처리 중'
   let message = ''
-  if (done && result.verdict) {
+  if (done && !result.anchored) {
+    tone = 'bg-charcoal-light text-white'
+    icon = '?'
+    title = '기록 미확정'
+    message = '블록체인 기록이 확정되지 않아 출입할 수 없습니다. 게이트 기록은 감리 감사 저장소에 남았습니다'
+  } else if (done && result.entryStatus === 'Granted') {
     tone = 'bg-hazard-green text-white'
     icon = '✓'
     title = '출입 허용'
-    message = '안전 검사를 모두 통과했습니다'
+    message = '오늘 위험성평가가 등록돼 있고, 안전 검사를 모두 통과했습니다'
   } else if (done && overrideResult) {
     tone = 'bg-safety-yellow text-charcoal'
     icon = '!'
     title = '감독자 확인 후 출입 허용'
     message = `사유: ${overrideResult.reason}`
+  } else if (done && result.entryStatus === 'HeldNoAssessment') {
+    tone = 'bg-safety-orange text-white'
+    icon = '‖'
+    title = '출입 보류'
+    message = '오늘 위험성평가가 아직 등록되지 않았습니다. 평가가 등록된 뒤 다시 검사받으세요. 출입 시도는 기록됐습니다'
+  } else if (done && result.entryStatus === 'LateAuditOnly') {
+    tone = 'bg-ink-muted text-white'
+    icon = '⧗'
+    title = '지연 도착 기록'
+    message = '늦게 전송된 기록이라 출입 근거로 쓰지 않습니다. 검사 사실은 감사용으로 남았습니다'
   } else if (done) {
     tone = 'bg-hazard-red text-white'
     icon = '✕'
@@ -499,9 +538,14 @@ function ResultScreen(props: {
               >
                 다음 작업자
               </button>
-              <div className="opacity-80 [&_a]:text-current [&_summary]:text-current">
-                <ChainLink txHash={overrideResult?.txHash ?? result.txHash} />
-              </div>
+              <p className="text-xs opacity-80">
+                게이트 기록 #{result.deviceSeq} · 감리 감사 저장소 {result.auditDelivered ? '전달됨' : '전달 실패'}
+              </p>
+              {(overrideResult?.txHash ?? result.txHash) && (
+                <div className="opacity-80 [&_a]:text-current [&_summary]:text-current">
+                  <ChainLink txHash={(overrideResult?.txHash ?? result.txHash) as string} />
+                </div>
+              )}
             </div>
           </>
         )}

@@ -7,4 +7,4 @@ models/*.pt
 uploads/
 pseudonym.key
 photo.key
-measure_result.csv
+measure_out/

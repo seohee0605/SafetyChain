@@ -16,7 +16,7 @@ type CheckInRow = {
   timestamp: number
   overridden: boolean
   overrideReason: string | null
-  entryStatus: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly' | null
+  entryStatus: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly' | 'SuspectTimestamp' | null
 }
 
 type SiteRecordRow = {
@@ -41,6 +41,7 @@ type CaseBundle = {
   caseId: string
   siteRecords: SiteRecordRow[]
   checkIns: CheckInRow[]
+  emergencies?: { nonce: string; reason: string | null; timestamp: number; supervisor: string; approver: string }[]
   state: { status: CaseStatus; scopeHash: string; round: number }
   history: HistoryRow[]
 }
@@ -203,6 +204,8 @@ export default function CaseReview() {
                       <span className="text-safety-orange font-semibold">위험성평가 전 · 출입 보류</span>
                     ) : c.entryStatus === 'HeldHazardsOpen' ? (
                       <span className="text-safety-orange font-semibold">위험요인 미조치 · 출입 보류</span>
+                    ) : c.entryStatus === 'SuspectTimestamp' ? (
+                      <span className="text-ink-muted font-semibold">기록 시각 의심 · 감사용</span>
                     ) : c.entryStatus === 'LateAuditOnly' ? (
                       <span className="text-ink-muted font-semibold">지연 도착 · 감사용</span>
                     ) : (
@@ -216,6 +219,22 @@ export default function CaseReview() {
               )
             })}
           </div>
+
+          {bundle.emergencies && bundle.emergencies.length > 0 && (
+            <div>
+              <p className="font-display font-bold uppercase text-sm text-charcoal mb-2">
+                긴급·장비 장애 예외 출입 ({bundle.emergencies.length}건)
+              </p>
+              {bundle.emergencies.map((e) => (
+                <div key={e.nonce} className="border-2 border-charcoal/20 p-2.5 mb-2 text-sm flex justify-between gap-2">
+                  <span className="text-ink">{e.reason}</span>
+                  <span className="text-ink-muted text-xs">
+                    {new Date(e.timestamp * 1000).toLocaleTimeString()} · {e.supervisor} + {e.approver}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {check && bundle.state.round > 0 && (
             <div className="space-y-2 pt-2">

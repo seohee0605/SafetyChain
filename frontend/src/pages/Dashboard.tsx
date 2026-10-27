@@ -22,6 +22,8 @@ type DashboardData = {
   overrideRate: number
   heldCount: number
   lateCount: number
+  suspectCount: number
+  emergencyCount: number
   noIncidentDays: number | null
   noIncidentSince: 'incident' | 'firstRecord' | null
   lastIncidentDate: string | null
@@ -131,7 +133,17 @@ export default function Dashboard() {
               <span className="text-ink-muted uppercase font-display tracking-wide text-sm">지연 도착 기록 (감사용)</span>
               <span className="text-3xl font-display font-extrabold text-charcoal">{data.lateCount}건</span>
             </div>
-            <p className="text-xs text-ink-muted">보류·지연 기록도 검사 건수에는 포함되지만 출입 근거로는 쓰지 않습니다.</p>
+            <div className="flex justify-between items-baseline">
+              <span className="text-ink-muted uppercase font-display tracking-wide text-sm">기록 시각 의심 (감사용)</span>
+              <span className="text-3xl font-display font-extrabold text-charcoal">{data.suspectCount}건</span>
+            </div>
+            <div className="flex justify-between items-baseline border-t-2 border-charcoal/10 pt-3">
+              <span className="text-ink-muted uppercase font-display tracking-wide text-sm">긴급·장비 장애 예외 출입</span>
+              <span className="text-3xl font-display font-extrabold text-charcoal">{data.emergencyCount}건</span>
+            </div>
+            <p className="text-xs text-ink-muted">
+              보류·지연·의심 기록도 검사 건수에는 포함되지만 출입 근거로는 쓰지 않습니다. 예외 출입은 감독자와 감리(또는 발주처)가 함께 서명한 건만 집계됩니다.
+            </p>
           </Card>
 
           <details className="text-sm text-ink-muted">

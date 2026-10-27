@@ -2,6 +2,8 @@
 export const BACKEND_URL = `http://${window.location.hostname}:8000`
 // 감리 감사 저장소: 시공사 백엔드와 별도 서비스. 감리 화면은 시공사 백엔드를 거치지 않고 여기와 체인만 본다
 export const AUDIT_URL = `http://${window.location.hostname}:8100`
+// 게이트 기기 서비스: 기기 키·YOLO를 가진 쪽. 키오스크는 시공사 백엔드가 아니라 여기로 검사를 보낸다
+export const GATE_URL = `http://${window.location.hostname}:8200`
 export const RPC_URL = 'https://sepolia.drpc.org'
 export const CONTRACT_ADDRESS = '0xEE54363cC9E336B2ce1327dBe206D2514568cbC4' as const
 // 로컬 체인이면 탐색기 링크 없음

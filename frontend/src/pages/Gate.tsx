@@ -2,10 +2,10 @@ import jsQR from 'jsqr'
 import QRCode from 'qrcode'
 import { useEffect, useRef, useState } from 'react'
 import { Card, ChainLink, ErrorText, Input, PageTitle, SecondaryButton, Select, StepHeading, SuccessButton } from '../components/ui'
-import { BACKEND_URL } from '../config'
+import { BACKEND_URL, GATE_URL } from '../config'
 
 type QrIssue = { nonce: string; expiresAt: number }
-type EntryStatus = 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly'
+type EntryStatus = 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly' | 'SuspectTimestamp'
 type GateResult = {
   anchored: boolean
   txHash: string | null
@@ -23,6 +23,7 @@ type GateResult = {
 type Reason = { code: number; label: string }
 type Admin = { name: string; address: string }
 type OverrideResult = { txHash: string; reason: string }
+type EmergencyResult = { txHash: string; reason: string }
 type Stage = 'inspecting' | 'signing' | 'auditing' | 'anchoring' | 'confirmed' | 'not_anchored'
 
 const STAGES: { key: Stage; label: string }[] = [
@@ -67,6 +68,11 @@ export default function Gate() {
   const [overriding, setOverriding] = useState(false)
   // 시연: 게이트가 오프라인이라 N분 전에 서명해 둔 기록을 지금 보내는 상황
   const [delayMinutes, setDelayMinutes] = useState(0)
+  const [emergencyReasons, setEmergencyReasons] = useState<Reason[]>([])
+  const [emergencyReason, setEmergencyReason] = useState(1)
+  const [emergencyReviewer, setEmergencyReviewer] = useState<'inspector' | 'owner'>('inspector')
+  const [emergencyResult, setEmergencyResult] = useState<EmergencyResult | null>(null)
+  const [emergencyError, setEmergencyError] = useState<string | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -77,7 +83,10 @@ export default function Gate() {
   useEffect(() => {
     fetch(`${BACKEND_URL}/reasons`)
       .then((res) => res.json())
-      .then((r: { override: Reason[] }) => setReasons(r.override))
+      .then((r: { override: Reason[]; emergency?: Reason[] }) => {
+        setReasons(r.override)
+        setEmergencyReasons(r.emergency ?? [])
+      })
       .catch(() => {})
     fetch(`${BACKEND_URL}/admins`)
       .then((res) => res.json())
@@ -229,7 +238,8 @@ export default function Gate() {
       form.append('workDate', workDate)
       if (delayMinutes > 0) form.append('signedMinutesAgo', String(delayMinutes))
 
-      const res = await fetch(`${BACKEND_URL}/gate/check/stream`, { method: 'POST', body: form })
+      // 검사는 게이트 기기 서비스로 보낸다 (기기 키는 시공사 백엔드에 없음)
+      const res = await fetch(`${GATE_URL}/check/stream`, { method: 'POST', body: form })
       if (!res.ok || !res.body) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.detail ?? '제출 실패')
@@ -255,6 +265,20 @@ export default function Gate() {
       setStage(null)
       setError(e instanceof Error ? e.message : '알 수 없는 오류')
     }
+  }
+
+  // 게이트 고장·응급 상황 등 정상 검사를 못 할 때의 별도 절차. 감독자 + 감리(또는 발주처) 둘 다 서명해야 기록된다
+  async function submitEmergency() {
+    setEmergencyError(null)
+    setEmergencyResult(null)
+    const res = await fetch(`${BACKEND_URL}/gate/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siteId, workerId, workDate, reasonCode: emergencyReason, supervisorName, reviewer: emergencyReviewer }),
+    })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) setEmergencyError(body.detail ?? '예외 출입 기록 실패')
+    else setEmergencyResult(body)
   }
 
   // AI 보호구 불합격을 감독자가 사유 코드와 함께 수동 처리. 원래 판정은 그대로 남고 override 기록이 추가된다
@@ -392,6 +416,49 @@ export default function Gate() {
 
       {error && <ErrorText>{error}</ErrorText>}
 
+      <details className="border-2 border-dashed border-charcoal/50 p-4 text-sm">
+        <summary className="cursor-pointer font-semibold select-none text-ink">긴급·장비 장애 예외 출입</summary>
+        <div className="mt-3 space-y-2.5">
+          <p className="text-xs text-ink-muted">
+            게이트 고장·응급 대응처럼 정상 검사를 할 수 없을 때만 씁니다. 감독자 서명과 감리(또는 발주처) 서명이 함께 있어야 기록되고,
+            현장 통계와 감리 화면에 따로 집계됩니다. 위의 사번·현장 ID를 사용합니다.
+          </p>
+          <Select value={emergencyReason} onChange={(e) => setEmergencyReason(Number(e.target.value))}>
+            {emergencyReasons.map((r) => (
+              <option key={r.code} value={r.code}>
+                {r.label}
+              </option>
+            ))}
+          </Select>
+          <div className="flex gap-2">
+            <Select value={supervisorName} onChange={(e) => setSupervisorName(e.target.value)} className="flex-1">
+              {supervisors.map((a) => (
+                <option key={a.name} value={a.name}>
+                  감독자 {a.name}
+                </option>
+              ))}
+            </Select>
+            <Select
+              value={emergencyReviewer}
+              onChange={(e) => setEmergencyReviewer(e.target.value as 'inspector' | 'owner')}
+              className="flex-1"
+            >
+              <option value="inspector">감리 공동 서명</option>
+              <option value="owner">발주처 공동 서명</option>
+            </Select>
+          </div>
+          <SecondaryButton disabled={!workerId || !siteId || !supervisorName} onClick={submitEmergency}>
+            두 기관 서명으로 예외 출입 기록
+          </SecondaryButton>
+          {emergencyResult && (
+            <p className="text-sm bg-safety-yellow/20 border-2 border-charcoal p-2.5">
+              예외 출입이 기록됐습니다 · 사유: {emergencyResult.reason}
+            </p>
+          )}
+          {emergencyError && <ErrorText>{emergencyError}</ErrorText>}
+        </div>
+      </details>
+
       {stage && (
         <ResultScreen
           stage={stage}
@@ -480,6 +547,11 @@ function ResultScreen(props: {
     icon = '‖'
     title = '출입 보류'
     message = '오늘 위험성평가에 아직 조치되지 않은 위험요인이 있습니다. 조치 완료가 등록된 뒤 다시 검사받으세요. 출입 시도는 기록됐습니다'
+  } else if (done && result.entryStatus === 'SuspectTimestamp') {
+    tone = 'bg-ink-muted text-white'
+    icon = '⚠'
+    title = '기록 시각 의심'
+    message = '게이트 기기 시계가 블록체인 시각보다 앞서 있습니다. 출입 근거로 쓰지 않고 의심 기록으로 남겼습니다. 관리자에게 기기 시계 확인을 요청하세요'
   } else if (done && result.entryStatus === 'LateAuditOnly') {
     tone = 'bg-ink-muted text-white'
     icon = '⧗'

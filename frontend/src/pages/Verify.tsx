@@ -10,7 +10,7 @@ type VerifyData = {
   evidenceIntact: boolean
   modelHashMatch: boolean
   anchoredAt?: number
-  entryStatus?: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly'
+  entryStatus?: 'Granted' | 'Denied' | 'HeldNoAssessment' | 'HeldHazardsOpen' | 'LateAuditOnly' | 'SuspectTimestamp'
   entryAllowed?: boolean
   deviceSeq?: number
   overridden?: boolean
@@ -34,6 +34,7 @@ const ENTRY_LABEL = {
   HeldNoAssessment: '위험성평가 전 보류',
   HeldHazardsOpen: '위험요인 미조치 보류',
   LateAuditOnly: '지연 도착 (감사용)',
+  SuspectTimestamp: '기록 시각 의심 (감사용)',
 }
 
 export default function Verify() {

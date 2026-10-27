@@ -14,6 +14,7 @@ type AuditRecord = {
   passed: boolean
   audit: AuditState
   entryStatus: string | null
+  inContractorDb: boolean | null
 }
 
 type ChainOnly = { nonce: string; deviceSeq: number; device: string; passed: boolean; anchoredAt: number }
@@ -45,6 +46,8 @@ type Summary = {
   devices: DeviceRow[]
   revocations: Revocation[]
   conflicts: { device: string; deviceSeq: number; receivedAt: number }[]
+  contractor: { hidden: number; contractorOnly: number; total: number } | null
+  emergencies: { nonce: string; reason: string | null; supervisor: string; approver: string; anchoredAt: number }[]
 }
 
 type Reason = { code: number; label: string }
@@ -161,6 +164,9 @@ export default function Audit() {
                         </span>
                       )}
                     </span>
+                    {r.inContractorDb !== null && (
+                      <span className="shrink-0 text-xs text-ink-muted">시공사 DB {r.inContractorDb ? '있음' : '없음'}</span>
+                    )}
                     <span className={`shrink-0 px-2 py-1 border-2 border-charcoal text-xs font-semibold ${CELL_STYLE[r.audit].cls}`}>
                       {CELL_STYLE[r.audit].label}
                     </span>
@@ -174,6 +180,24 @@ export default function Audit() {
               )}
             </Card>
           )}
+
+          <Card>
+            <p className="font-display font-bold uppercase tracking-wide text-charcoal">긴급·장비 장애 예외 출입</p>
+            {data.emergencies.length === 0 ? (
+              <p className="text-sm text-ink-muted">예외 출입 기록이 없습니다.</p>
+            ) : (
+              <div className="divide-y-2 divide-charcoal/10">
+                {data.emergencies.map((e) => (
+                  <div key={e.nonce} className="flex justify-between gap-3 py-2 text-sm">
+                    <span className="text-ink">{e.reason}</span>
+                    <span className="shrink-0 text-ink-muted text-xs">
+                      {new Date(e.anchoredAt * 1000).toLocaleString()} · 감독자 {short(e.supervisor)} + {short(e.approver)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
 
           <Card>
             <p className="font-display font-bold uppercase tracking-wide text-charcoal">서명자 해제 이력</p>
@@ -229,7 +253,8 @@ export default function Audit() {
 function Verdict({ data, live, onToggleLive }: { data: Summary; live: boolean; onToggleLive: () => void }) {
   const c = data.counts
   const flagged = c.missing + c.replaced + c.mismatch
-  const ok = flagged === 0 && c.chainOnly === 0
+  const k = data.contractor
+  const ok = flagged === 0 && c.chainOnly === 0 && (!k || k.contractorOnly === 0)
   return (
     <div className={`border-2 border-charcoal p-5 ${ok ? 'bg-white' : 'bg-hazard-red text-white'}`}>
       <div className="flex justify-between items-start gap-3">
@@ -240,6 +265,11 @@ function Verdict({ data, live, onToggleLive }: { data: Summary; live: boolean; o
           <p className={`text-sm mt-2 ${ok ? 'text-ink-muted' : 'text-white/85'}`}>
             게이트 원본 {c.auditTotal}건 중 체인 확인 {c.anchored}건
             {c.pending > 0 && ` · 반영 대기 ${c.pending}건 (${data.graceSeconds}초 지나면 미제출로 판정)`}
+          </p>
+          <p className={`text-xs mt-1 ${ok ? 'text-ink-muted' : 'text-white/85'}`}>
+            {k
+              ? `3자 대조: 게이트 원본 ${c.auditTotal} · 시공사 DB ${k.total} · 블록체인 ${c.chainTotal}`
+              : '시공사 DB에 연결할 수 없어 게이트 원본과 블록체인만 대조했습니다'}
           </p>
         </div>
         <button
@@ -255,6 +285,8 @@ function Verdict({ data, live, onToggleLive }: { data: Summary; live: boolean; o
           <Stat n={c.replaced} label="바꿔치기" />
           <Stat n={c.mismatch} label="값 불일치" />
           <Stat n={c.chainOnly} label="체인에만 있음" />
+          {k && <Stat n={k.hidden} label="시공사 DB에서도 사라짐" />}
+          {k && <Stat n={k.contractorOnly} label="시공사 DB에만 있음" />}
         </div>
       )}
     </div>
@@ -271,7 +303,7 @@ function Stat({ n, label }: { n: number; label: string }) {
 }
 
 function Legend() {
-  const keys: Cell[] = ['anchored', 'pending', 'missing', 'replaced', 'gap']
+  const keys: Cell[] = ['anchored', 'pending', 'missing', 'replaced', 'chainOnly', 'gap']
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
       {keys.map((k) => (

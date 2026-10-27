@@ -11,7 +11,7 @@ type QrIssue = { nonce: string; expiresAt: number }
 type RecordRow = {
   nonce: string
   at: number
-  result: 'pass' | 'fail' | 'override' | 'held' | 'hazards' | 'late'
+  result: 'pass' | 'fail' | 'override' | 'held' | 'hazards' | 'late' | 'suspect'
   helmetPass: boolean
   shoesPass: boolean
   alcoholPass: boolean
@@ -46,9 +46,10 @@ const RESULT_LABEL = {
   held: { text: '위험성평가 전 보류', cls: 'bg-safety-orange text-white' },
   hazards: { text: '위험요인 미조치 보류', cls: 'bg-safety-orange text-white' },
   late: { text: '지연 도착 (감사용)', cls: 'bg-ink-muted text-white' },
+  suspect: { text: '기록 시각 의심', cls: 'bg-ink-muted text-white' },
 }
 
-const RESULT_ICON = { pass: '✓', override: '!', fail: '✕', held: '‖', hazards: '‖', late: '⧗' }
+const RESULT_ICON = { pass: '✓', override: '!', fail: '✕', held: '‖', hazards: '‖', late: '⧗', suspect: '⚠' }
 
 export default function Worker() {
   const [profile, setProfile] = useState<Profile | null>(loadProfile)

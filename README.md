@@ -45,10 +45,10 @@ SafetyChain은 안전모·안전화·음주 검사 결과, 일일 위험성평�
 [감독자] 위험성평가 작성 → 원문은 SQLite, 해시만 온체인 (SiteRecord)
 
 [감리 감사] 게이트 원본 · 시공사 DB · 블록체인 3자 대조 → 미제출·바꿔치기·DB 조작 표시
-[예외 출입] 게이트 고장·응급 시 감독자 + 감리(또는 발주처) 이중 서명
+[예외 출입] 게이트 고장·응급 시 감독자 서명 + 감리(또는 발주처)가 자기 지갑으로 공동 서명
 
 [케이스 확정] 현장·작업일 단위
-    시공사 감독자 제출 → 감리 승인 → 발주처 승인 = 확정
+    시공사 감독자 제출 → 감리 승인 → 발주처 승인 = 확정 (감리·발주처는 각자 MetaMask로 서명, 서버는 키 없음)
     반려(사유 코드) 시 보완 후 재제출, 모든 이력이 온체인에 남음
 ```
 
@@ -102,6 +102,25 @@ safetychain/
    └─ src/pages/{Gate,SiteRecord,CaseReview,Dashboard,Audit,Verify,Worker}.tsx
 ```
 
+## Sepolia 배포·데모 준비 순서
+
+1. **지갑 준비**: MetaMask에 감리용·발주처용 계정을 하나씩 만든다 (ETH 필요 없음, 서명만 함).
+   릴레이 계정(배포·가스 지불)에만 Sepolia ETH를 넣는다.
+2. **배포**: 위 "1. 컨트랙트"의 명령을 `--rpc-url <Sepolia RPC>`로 실행. `INSPECTOR_ADDRESS`·`OWNER_ADDRESS`에 1번 MetaMask 주소.
+   출력된 `SafetyGate deployed at:` 주소를 적어 둔다. 감리·발주처 주소는 배포 때 고정되어 바꿀 수 없다.
+3. **ABI·주소 반영**: `contracts/out/SafetyGate.sol/SafetyGate.json`의 `abi`를 `backend/abi`, `audit/abi`, `frontend/src/abi`에 복사
+   (이 저장소에는 이미 최신 ABI가 들어 있음). 새 주소를 `backend/.env`, `gate/.env`, `audit/.env`의 `CONTRACT_ADDRESS`와
+   `frontend/src/config.ts`의 `CONTRACT_ADDRESS`, `RPC_URL`에 넣는다.
+4. **환경 변수**: `backend/.env`에 `REVIEWER_SIGNING=wallet`, `INSPECTOR_ACCOUNT=감리:<주소>`, `OWNER_ACCOUNT=발주처:<주소>`,
+   `DEVICE_ADDRESS`. `INSPECTOR_SIGNER`·`OWNER_SIGNER`·`DEVICE_PRIVATE_KEY`는 지운다. 기기 키는 `gate/.env`에만.
+5. **서비스 실행**: 백엔드(8000) · 감사 저장소(8100) · 게이트(8200) · 프론트(5173).
+6. **서명자 승인**: 감리 감사 탭 → 현장 ID 입력 → "지갑 서명 대기"에서 게이트 기기·감독자 등록을 감리 MetaMask로 승인.
+   승인 전에는 게이트 검사가 `MissingRole`로 거부된다.
+7. **리허설**: 위험성평가 → 게이트 검사 → 케이스 제출 → 감리 지갑 승인 → 발주처 지갑 승인,
+   예외 출입 요청 → 감리 감사 탭에서 지갑 공동 서명, 릴레이 중단 → 감리 화면 누락 표시.
+8. **백업**: 데모 중 지갑 문제가 생기면 `backend/.env`를 `REVIEWER_SIGNING=server`로 바꾸고
+   `INSPECTOR_SIGNER`·`OWNER_SIGNER`에 키를 넣어 서버 서명으로 진행할 수 있다 (화면에 "백업 모드"로 표시됨).
+
 ## 로컬 실행
 
 ### 1. 컨트랙트
@@ -112,12 +131,13 @@ forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
 anvil                                   # 별도 터미널에서 로컬 체인 실행
 forge test                              # 92개 테스트
 
-# 배포 + 게이트 기기/감독자 등록 (감리 키로 승인 서명까지 스크립트에서 처리)
-export DEVICE_ADDRESS=0x...
-export ADMIN_SIGNER_ADDRESSES=0x...,0x...
-export INSPECTOR_PRIVATE_KEY=0x...
-export OWNER_ADDRESS=0x...
+# 배포 + 게이트 기기/감독자 등록 "제안" (승인은 배포 후 감리가 감리 감사 화면에서 지갑으로)
+export DEVICE_ADDRESS=0x...             # 게이트 기기 주소 (gate/.env의 DEVICE_PRIVATE_KEY 주소)
+export ADMIN_SIGNER_ADDRESSES=0x...     # 감독자 주소(콤마)
+export INSPECTOR_ADDRESS=0x...          # 감리 MetaMask 주소 (키는 넘기지 않음)
+export OWNER_ADDRESS=0x...              # 발주처 MetaMask 주소
 forge script script/Deploy.s.sol:DeployScript --rpc-url http://127.0.0.1:8545 --broadcast --private-key <릴레이 키>
+# (로컬 테스트용) INSPECTOR_ADDRESS 대신 INSPECTOR_PRIVATE_KEY를 주면 스크립트가 승인까지 한다
 ```
 
 ### 2. 시공사 백엔드

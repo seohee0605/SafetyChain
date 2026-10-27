@@ -15,6 +15,8 @@ type AuditRecord = {
   audit: AuditState
   entryStatus: string | null
   inContractorDb: boolean | null
+  // 미제출 기록을 감사 저장소가 체인에 직접 모의 실행한 결과
+  chainCheck: { verdict: 'withheld' | 'rejected'; reason: string | null } | null
 }
 
 type ChainOnly = { nonce: string; deviceSeq: number; device: string; passed: boolean; anchoredAt: number }
@@ -40,7 +42,7 @@ type Revocation = {
 
 type Summary = {
   graceSeconds: number
-  counts: Record<AuditState | 'chainOnly' | 'auditTotal' | 'chainTotal', number>
+  counts: Record<AuditState | 'chainOnly' | 'auditTotal' | 'chainTotal' | 'withheld' | 'chainRejected', number>
   records: AuditRecord[]
   chainOnly: ChainOnly[]
   devices: DeviceRow[]
@@ -65,12 +67,13 @@ const ERROR_LABEL: Record<string, string> = {
 type RelayMode = 'normal' | 'paused' | 'drop_failed'
 
 // 번호 띠 한 칸의 상태. 'gap'은 게이트도 체인도 모르는 번호 (게이트가 서명했지만 어디에도 전달되지 않음)
-type Cell = AuditState | 'chainOnly' | 'gap'
+type Cell = AuditState | 'rejected' | 'chainOnly' | 'gap'
 
 const CELL_STYLE: Record<Cell, { cls: string; label: string }> = {
   anchored: { cls: 'bg-hazard-green text-white', label: '체인 확인' },
   pending: { cls: 'bg-safety-yellow text-charcoal', label: '체인 반영 대기' },
-  missing: { cls: 'bg-hazard-red text-white', label: '체인 미제출' },
+  missing: { cls: 'bg-hazard-red text-white', label: '받을 수 있었는데 제출 안 됨' },
+  rejected: { cls: 'bg-hazard-red/15 text-hazard-red', label: '체인이 거부' },
   replaced: { cls: 'bg-charcoal text-safety-yellow', label: '다른 기록으로 바꿔치기' },
   mismatch: { cls: 'bg-charcoal text-safety-yellow', label: '체인 값과 다름' },
   chainOnly: { cls: 'bg-white text-charcoal border-dashed', label: '체인에만 있음' },
@@ -114,7 +117,6 @@ export default function Audit() {
     return () => clearInterval(id)
   }, [loadedSite, live, load])
 
-  const rejectedByNonce = new Map(rejections.filter((r) => r.nonce).map((r) => [r.nonce as string, r.error]))
   const problems = (data?.records.filter((r) => PROBLEM.includes(r.audit)) ?? []).sort((a, b) => a.deviceSeq - b.deviceSeq)
 
   return (
@@ -158,18 +160,28 @@ export default function Audit() {
                     <span className="flex-1 text-ink">
                       {r.passed ? '검사 통과' : '검사 불합격'}
                       <span className="text-ink-muted"> · 게이트 서명 {time(r.signedAt)}</span>
-                      {rejectedByNonce.has(r.nonce) && (
+                      {r.chainCheck?.verdict === 'withheld' && (
+                        <span className="block text-xs text-hazard-red font-semibold">
+                          체인에 직접 모의 실행: 받을 수 있는 기록인데 제출되지 않음
+                        </span>
+                      )}
+                      {r.chainCheck?.verdict === 'rejected' && (
                         <span className="block text-xs text-ink-muted">
-                          릴레이 기록상 체인이 거부함: {ERROR_LABEL[rejectedByNonce.get(r.nonce) as string] ?? rejectedByNonce.get(r.nonce)}
+                          체인에 직접 모의 실행: 거부됨 · {ERROR_LABEL[r.chainCheck.reason ?? ''] ?? r.chainCheck.reason}
                         </span>
                       )}
                     </span>
                     {r.inContractorDb !== null && (
                       <span className="shrink-0 text-xs text-ink-muted">시공사 DB {r.inContractorDb ? '있음' : '없음'}</span>
                     )}
-                    <span className={`shrink-0 px-2 py-1 border-2 border-charcoal text-xs font-semibold ${CELL_STYLE[r.audit].cls}`}>
-                      {CELL_STYLE[r.audit].label}
-                    </span>
+                    {(() => {
+                      const cell: Cell = r.chainCheck?.verdict === 'rejected' ? 'rejected' : r.audit
+                      return (
+                        <span className={`shrink-0 px-2 py-1 border-2 border-charcoal text-xs font-semibold ${CELL_STYLE[cell].cls}`}>
+                          {CELL_STYLE[cell].label}
+                        </span>
+                      )
+                    })()}
                   </div>
                 ))}
               </div>
@@ -222,7 +234,7 @@ export default function Audit() {
           <Card>
             <div className="flex flex-wrap justify-between items-baseline gap-2">
               <p className="font-display font-bold uppercase tracking-wide text-charcoal">체인이 거부한 제출</p>
-              <span className="text-xs text-ink-muted">시공사 백엔드 로그 · 참고용</span>
+              <span className="text-xs text-ink-muted">시공사 릴레이 로그</span>
             </div>
             {rejections.length === 0 ? (
               <p className="text-sm text-ink-muted">거부된 제출이 없습니다.</p>
@@ -239,7 +251,7 @@ export default function Audit() {
               </div>
             )}
             <p className="text-xs text-ink-muted">
-              거부된 트랜잭션은 블록체인에 흔적이 남지 않아 릴레이가 받은 거부 응답을 따로 기록합니다. 누락 판정의 기준은 위의 감사 저장소 대조입니다.
+              시공사 릴레이가 스스로 남긴 기록입니다. 미제출 기록의 실제 거부 여부·사유는 감사 저장소가 체인에 직접 모의 실행해 위 목록에 표시하므로, 이 로그와 다르면 위 결과가 기준입니다.
             </p>
           </Card>
 
@@ -252,7 +264,8 @@ export default function Audit() {
 
 function Verdict({ data, live, onToggleLive }: { data: Summary; live: boolean; onToggleLive: () => void }) {
   const c = data.counts
-  const flagged = c.missing + c.replaced + c.mismatch
+  // 체인이 거부한 기록은 정상적인 거부라 누락·변조 의심에서 뺀다 (사유는 목록에 표시)
+  const flagged = c.withheld + c.replaced + c.mismatch
   const k = data.contractor
   const ok = flagged === 0 && c.chainOnly === 0 && (!k || k.contractorOnly === 0)
   return (
@@ -281,9 +294,10 @@ function Verdict({ data, live, onToggleLive }: { data: Summary; live: boolean; o
       </div>
       {!ok && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4 text-sm">
-          <Stat n={c.missing} label="체인 미제출" />
+          <Stat n={c.withheld} label="받을 수 있었는데 안 냄" />
           <Stat n={c.replaced} label="바꿔치기" />
           <Stat n={c.mismatch} label="값 불일치" />
+          <Stat n={c.chainRejected} label="체인이 거부 (사유 확인)" />
           <Stat n={c.chainOnly} label="체인에만 있음" />
           {k && <Stat n={k.hidden} label="시공사 DB에서도 사라짐" />}
           {k && <Stat n={k.contractorOnly} label="시공사 DB에만 있음" />}
@@ -303,7 +317,7 @@ function Stat({ n, label }: { n: number; label: string }) {
 }
 
 function Legend() {
-  const keys: Cell[] = ['anchored', 'pending', 'missing', 'replaced', 'chainOnly', 'gap']
+  const keys: Cell[] = ['anchored', 'pending', 'missing', 'rejected', 'replaced', 'chainOnly', 'gap']
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
       {keys.map((k) => (
@@ -321,7 +335,9 @@ function SequenceStrip({ device, records, chainOnly }: { device: DeviceRow; reco
   const max = Math.max(device.chainHighestSeq, device.auditHighestSeq)
   const bySeq = new Map<number, Cell>()
   chainOnly.filter((c) => c.device === device.address).forEach((c) => bySeq.set(c.deviceSeq, 'chainOnly'))
-  records.filter((r) => r.device === device.address).forEach((r) => bySeq.set(r.deviceSeq, r.audit))
+  records
+    .filter((r) => r.device === device.address)
+    .forEach((r) => bySeq.set(r.deviceSeq, r.chainCheck?.verdict === 'rejected' ? 'rejected' : r.audit))
   const cells = Array.from({ length: max }, (_, i) => i + 1)
 
   return (

@@ -10,6 +10,11 @@
     · 바꿔치기(replaced): 같은 기기·같은 일련번호인데 체인에는 다른 기록이 올라감
     · 불일치(mismatch): 같은 nonce인데 체인 값이 게이트 원본과 다름
     · 체인 전용(chainOnly): 체인엔 있는데 게이트가 이곳에 보내지 않은 기록
+- 미제출 기록은 서명된 원본을 컨트랙트에 직접 모의 실행(eth_call, 가스 없음)해서 둘로 나눈다.
+    · 제출 보류(withheld): 체인이 받을 수 있었는데 시공사가 내지 않음  ← 가장 강한 누락 증거
+    · 체인 거부(rejected): 체인이 거부했을 기록 + 체인이 알려준 거부 사유
+  시공사 릴레이의 거부 로그를 믿지 않고 감리가 체인에서 직접 확인하는 것이다.
+  모의 실행은 '지금' 기준이라, 받은 직후 한 번 · 미제출로 판정될 때 한 번 실행해 결과를 저장해 둔다.
 - 세 번째로 시공사 DB 목록도 받아 대조한다 (감사 저장소 · 시공사 DB · 체인 3자 대조).
     · 시공사 DB에도 없음: 시공사가 체인에도 안 내고 자기 기록에서도 지운 것
     · 시공사 DB에만 있음: 게이트 원본도 체인 기록도 없는데 시공사 DB에만 있는 것 (DB 조작 의심)
@@ -96,6 +101,9 @@ CREATE TABLE IF NOT EXISTS records (
     signature TEXT NOT NULL,
     signed_at INTEGER NOT NULL,
     received_at INTEGER NOT NULL,
+    receipt_check TEXT,            -- 받은 직후 모의 실행 결과: 'ok' 또는 컨트랙트 에러 이름
+    missing_check TEXT,            -- 미제출로 판정될 때 모의 실행 결과
+    missing_check_at INTEGER,
     UNIQUE (device, device_seq)
 );
 
@@ -128,6 +136,10 @@ def get_conn():
 def _startup() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(records)")}
+        for col, typ in (("receipt_check", "TEXT"), ("missing_check", "TEXT"), ("missing_check_at", "INTEGER")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE records ADD COLUMN {col} {typ}")
 
 
 def _hex(b: bytes) -> str:
@@ -157,6 +169,41 @@ def _parse_checkin(raw: dict) -> dict:
 
 def _canonical(checkin: dict) -> dict:
     return {k: (_hex(v) if isinstance(v, bytes) else v) for k, v in checkin.items()}
+
+
+def _error_selectors() -> dict[str, str]:
+    out = {}
+    for item in contract.abi:
+        if item.get("type") == "error":
+            sig = f"{item['name']}({','.join(i['type'] for i in item['inputs'])})"
+            out[Web3.keccak(text=sig)[:4].hex().removeprefix("0x")] = item["name"]
+    return out
+
+
+_ERRORS = _error_selectors()
+
+
+def _dry_run(checkin: dict, signature: bytes) -> str:
+    """서명된 원본을 컨트랙트에 모의 실행한다 (eth_call, 트랜잭션 아님). 'ok' 또는 거부 사유(에러 이름)."""
+    try:
+        contract.functions.submitCheckIn(tuple(checkin[n] for n, _ in CHECKIN_FIELDS), signature).call(
+            {"from": "0x000000000000000000000000000000000000dEaD"}, block_identifier="pending"
+        )
+        return "ok"
+    except Exception as e:  # noqa: BLE001 - revert 데이터에서 에러 이름을 찾는다
+        text = str(e).lower()
+        for selector, name in _ERRORS.items():
+            if selector in text:
+                return name
+        return "Reverted"
+
+
+def _chain_check(receipt: str | None, missing: str | None) -> dict:
+    """미제출 기록의 판정. 지금은 시간 초과로 거부되더라도 받은 직후에 유효했으면 '제출 보류'로 본다."""
+    if missing == "ok" or (receipt == "ok" and missing == "StaleTimestamp"):
+        return {"verdict": "withheld", "reason": None}
+    reason = missing if missing and missing != "ok" else receipt
+    return {"verdict": "rejected", "reason": reason}
 
 
 def _recover(checkin: dict, signature: bytes) -> str:
@@ -220,7 +267,11 @@ def receive_record(body: RecordIn):
             )
         except sqlite3.IntegrityError:
             raise HTTPException(409, "nonce already stored with a different sequence number")
-    return {"stored": True, "device": device, "deviceSeq": checkin["deviceSeq"]}
+    # 받은 직후 모의 실행: 이 시점에 체인이 이 기록을 받을 수 있었는지 남겨 둔다
+    receipt = _dry_run(checkin, signature)
+    with get_conn() as conn:
+        conn.execute("UPDATE records SET receipt_check = ? WHERE nonce = ?", (receipt, nonce))
+    return {"stored": True, "device": device, "deviceSeq": checkin["deviceSeq"], "receiptCheck": receipt}
 
 
 # ======================================================================
@@ -301,7 +352,7 @@ def summary(site: str):
     chain_by_seq = {(c["device"], c["data"]["deviceSeq"]): c for c in chain_rows}
 
     records = []
-    counts = {"anchored": 0, "pending": 0, "missing": 0, "replaced": 0, "mismatch": 0}
+    counts = {"anchored": 0, "pending": 0, "missing": 0, "replaced": 0, "mismatch": 0, "withheld": 0, "chainRejected": 0}
     audit_nonces = set()
     for r in audit_rows:
         original = json.loads(r["checkin_json"])
@@ -317,6 +368,19 @@ def summary(site: str):
             status = "mismatch"  # nonce가 다른 종류의 기록에 쓰임
         else:
             status = "pending" if now - r["received_at"] < GRACE_SECONDS else "missing"
+        chain_check = None
+        if status == "missing":
+            missing_check = r["missing_check"]
+            if missing_check is None:
+                # 미제출로 처음 판정된 순간 체인에 직접 모의 실행하고 결과를 저장한다
+                missing_check = _dry_run(_parse_checkin(original), bytes.fromhex(r["signature"][2:]))
+                with get_conn() as conn:
+                    conn.execute(
+                        "UPDATE records SET missing_check = ?, missing_check_at = ? WHERE nonce = ?",
+                        (missing_check, now, r["nonce"]),
+                    )
+            chain_check = _chain_check(r["receipt_check"], missing_check)
+            counts["withheld" if chain_check["verdict"] == "withheld" else "chainRejected"] += 1
         counts[status] += 1
         records.append({
             **_public_view(original),
@@ -324,6 +388,7 @@ def summary(site: str):
             "receivedAt": r["received_at"],
             "audit": status,
             "inContractorDb": None if contractor is None else r["nonce"] in contractor,
+            "chainCheck": chain_check,
             "anchoredAt": onchain["anchoredAt"] if onchain and status == "anchored" else None,
             "entryStatus": onchain["status"] if onchain and status == "anchored" else None,
         })
@@ -338,8 +403,12 @@ def summary(site: str):
     contractor_counts = None
     if contractor is not None:
         contractor_counts = {
-            # 게이트 원본은 있는데 시공사 DB에도 체인에도 없음 = 시공사가 기록을 통째로 감춤
-            "hidden": sum(1 for r in records if r["inContractorDb"] is False and r["audit"] in ("missing", "pending")),
+            # 체인이 받을 수 있었는데 시공사 DB에도 체인에도 없음 = 시공사가 기록을 통째로 감춤
+            # (체인이 거부한 기록은 시공사 DB에 없는 게 정상이라 세지 않는다)
+            "hidden": sum(
+                1 for r in records
+                if r["inContractorDb"] is False and r["chainCheck"] and r["chainCheck"]["verdict"] == "withheld"
+            ),
             # 시공사 DB에만 있음 (게이트 원본·체인 둘 다 없음)
             "contractorOnly": len(contractor - audit_nonces - chain_nonces),
             "total": len(contractor),

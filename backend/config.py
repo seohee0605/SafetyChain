@@ -94,6 +94,9 @@ GATE_URL = os.environ.get("GATE_URL", "http://127.0.0.1:8200")
 # 시연용 제어(릴레이 중단, 지연 전송 재현, 기기 해제·재등록)를 켤지. 실서비스에서는 꺼둔다.
 DEMO_CONTROLS = os.environ.get("DEMO_CONTROLS", "0") == "1"
 
+# 릴레이가 보낸 트랜잭션이 블록에 들어가길 기다리는 최대 시간(초). 넘으면 '확정 대기'로 돌려준다 (거부 아님)
+RECEIPT_TIMEOUT = int(os.environ.get("RECEIPT_TIMEOUT", "120"))
+
 
 def _load_photo_key() -> bytes:
     """검사 사진 암호화 키 (AES-256-GCM). .env의 PHOTO_KEY(64자리 hex)를 우선, 없으면 backend/photo.key 생성.

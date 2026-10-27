@@ -13,12 +13,14 @@
 import hashlib
 import hmac
 import json
+import threading
 import time
 from pathlib import Path
 
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import Web3
+from web3.exceptions import TimeExhausted, Web3RPCError
 
 import config
 
@@ -280,6 +282,14 @@ class OnchainRejected(Exception):
     pass
 
 
+class OnchainPending(Exception):
+    """트랜잭션은 보냈지만 RECEIPT_TIMEOUT 안에 블록에 들어가지 않았다. 나중에 들어갈 수 있으므로 거부와 구분한다."""
+
+    def __init__(self, tx_hash: str):
+        super().__init__(f"transaction pending: {tx_hash}")
+        self.tx_hash = tx_hash
+
+
 def _error_selectors() -> dict[str, str]:
     out = {}
     for item in contract.abi:
@@ -307,19 +317,42 @@ def _send(fn) -> str:
     # 가스 추정은 'pending' 블록 기준으로 한다. 'latest' 기준이면 블록이 한동안 안 생긴 로컬 체인(Anvil)에서
     # 마지막 블록 시각으로 시간 검증이 돌아가, 방금 서명한 기록이 '미래 시각(StaleTimestamp)'으로 잘못 거부된다.
     gas = fn.estimate_gas({"from": _sender_account.address}, block_identifier="pending")
-    tx = fn.build_transaction(
-        {
-            "from": _sender_account.address,
-            "nonce": w3.eth.get_transaction_count(_sender_account.address),
-            "gas": int(gas * 1.2),  # 테스트넷 업그레이드 후 추정 오차 대비 여유분
-        }
-    )
-    signed_tx = _sender_account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    tx_hash = _send_with_nonce(fn, int(gas * 1.2))  # 1.2: 테스트넷 업그레이드 후 추정 오차 대비 여유분
+    try:
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=config.RECEIPT_TIMEOUT)
+    except TimeExhausted:
+        raise OnchainPending(to_hex0x(tx_hash))
     if receipt.status != 1:
         raise OnchainRejected(f"transaction reverted: {to_hex0x(tx_hash)}")
     return to_hex0x(tx_hash)
+
+
+# 릴레이 계정 하나로 여러 기록(게이트 여러 대·위험성평가·Override·케이스)을 동시에 내면, 체인 nonce를 'latest'로
+# 읽을 경우 블록이 나오기 전(약 12초) 두 요청이 같은 nonce를 받아 뒤의 것이 'replacement transaction
+# underpriced'로 버려진다. 실측(동시 4건 중 3건 실패)에서 확인했다. 그 기록은 감사 저장소에만 남아
+# 시공사가 '숨긴 기록'으로 잘못 잡힌다. 그래서 nonce는 이 프로세스가 잠금 안에서 직접 하나씩 나눠 준다.
+_nonce_lock = threading.Lock()
+_next_nonce: int | None = None
+_NONCE_ERRORS = ("nonce too low", "replacement transaction underpriced", "already known", "nonce has already been used")
+
+
+def _send_with_nonce(fn, gas: int):
+    global _next_nonce
+    for attempt in range(3):
+        with _nonce_lock:
+            pending = w3.eth.get_transaction_count(_sender_account.address, "pending")
+            nonce = pending if _next_nonce is None else max(_next_nonce, pending)
+            tx = fn.build_transaction({"from": _sender_account.address, "nonce": nonce, "gas": gas})
+            try:
+                tx_hash = w3.eth.send_raw_transaction(_sender_account.sign_transaction(tx).raw_transaction)
+            except Web3RPCError as e:
+                _next_nonce = None  # 체인 기준으로 다시 맞춘다
+                if attempt < 2 and any(m in str(e).lower() for m in _NONCE_ERRORS):
+                    continue
+                raise
+            _next_nonce = nonce + 1
+            return tx_hash
+    raise OnchainRejected("could not assign relay nonce")
 
 
 def _now() -> int:

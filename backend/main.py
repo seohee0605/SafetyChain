@@ -11,7 +11,7 @@ import urllib.request
 from Crypto.Cipher import AES
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from web3.exceptions import ContractCustomError, ContractLogicError
 
@@ -64,6 +64,12 @@ ONCHAIN_ERRORS = (ContractLogicError, ContractCustomError, chain.OnchainRejected
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+
+
+@app.exception_handler(chain.OnchainPending)
+def _pending_handler(_request, e: chain.OnchainPending):
+    # 보냈지만 아직 블록에 안 들어감. 거부가 아니므로 500 대신 504와 txHash를 돌려 화면이 '확정 대기'로 안내하게 한다
+    return JSONResponse(status_code=504, content={"detail": str(e), "txHash": e.tx_hash, "pending": True})
 
 
 def _default_work_date() -> str:
@@ -287,13 +293,17 @@ def gate_relay(checkin: str = Form(...), signature: str = Form(...), image: Uplo
         return {**base, "anchored": False, "txHash": None, "entryStatus": None, "entryAllowed": False,
                 "overridable": False}
 
+    pending = False
     try:
         tx_hash = chain.submit_checkin(msg, sig)
     except ONCHAIN_ERRORS as e:
         db.record_rejection("checkin", nonce, site_id, chain.describe_error(e))
         raise HTTPException(400, f"on-chain submission rejected: {chain.describe_error(e)}")
+    except chain.OnchainPending as e:
+        # 보냈는데 제한 시간 안에 블록에 안 들어갔다. 숨긴 게 아니므로 시공사 DB에는 남기고, 게이트에는 '미확정'으로 알린다
+        tx_hash, pending = e.tx_hash, True
 
-    onchain = chain.get_onchain_checkin(msg["nonce"])
+    onchain = None if pending else chain.get_onchain_checkin(msg["nonce"])
     entry_status = onchain["status"] if onchain else None
     db.consume_nonce(nonce)
     # 사진에는 얼굴이 찍히므로 암호화해서 보관한다 (해시는 원본 기준이라 검증은 복호화 후 비교)
@@ -317,6 +327,9 @@ def gate_relay(checkin: str = Form(...), signature: str = Form(...), image: Uplo
         entry_status=entry_status,
         device_seq=msg["deviceSeq"],
     )
+    if pending:
+        return {**base, "anchored": False, "pending": True, "txHash": tx_hash, "entryStatus": None,
+                "entryAllowed": False, "overridable": False}
     return {
         **base,
         "anchored": True,

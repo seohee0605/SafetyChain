@@ -29,7 +29,7 @@ contract SafetyGateTest is Test {
     bytes32 constant SCOPE = keccak256("nonces-of-day");
 
     bytes32 constant CHECKIN_TYPEHASH = keccak256(
-        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 timestamp)"
+        "CheckIn(bytes32 caseId,bytes32 workerId,bytes32 siteId,bool helmetPass,bool shoesPass,bool alcoholPass,bytes32 modelHash,bytes32 evidenceHash,bytes32 nonce,uint64 deviceSeq,uint64 timestamp)"
     );
     bytes32 constant SITE_RECORD_TYPEHASH = keccak256(
         "SiteRecord(bytes32 caseId,bytes32 siteId,bytes32 recordHash,bool hazardsControlled,bytes32 nonce,uint64 timestamp)"
@@ -41,6 +41,7 @@ contract SafetyGateTest is Test {
     );
 
     uint256 nonceCounter;
+    uint64 seqCounter;
 
     function setUp() public {
         vm.warp(1_790_000_000); // 2026년 근처의 현실적인 블록 시각
@@ -87,7 +88,6 @@ contract SafetyGateTest is Test {
 
     function _checkIn(bytes32 nonce, bool helmet, bool shoes, bool alcohol)
         internal
-        view
         returns (SafetyGate.CheckIn memory)
     {
         return SafetyGate.CheckIn({
@@ -100,6 +100,7 @@ contract SafetyGateTest is Test {
             modelHash: MODEL_HASH,
             evidenceHash: keccak256("photo-bytes"),
             nonce: nonce,
+            deviceSeq: ++seqCounter,
             timestamp: uint64(block.timestamp)
         });
     }
@@ -119,6 +120,7 @@ contract SafetyGateTest is Test {
                     c.modelHash,
                     c.evidenceHash,
                     c.nonce,
+                    c.deviceSeq,
                     c.timestamp
                 )
             )
@@ -161,6 +163,17 @@ contract SafetyGateTest is Test {
                 )
             )
         );
+    }
+
+    /// @dev 오늘(CASE_ID) 위험성평가를 제출한다. 출입 허가(Granted)의 전제 조건.
+    function _assess(bool hazardsControlled) internal {
+        SafetyGate.SiteRecord memory r = _siteRecord(_nonce());
+        r.hazardsControlled = hazardsControlled;
+        gate.submitSiteRecord(r, _signSiteRecord(r, supervisorPk));
+    }
+
+    function _status(bytes32 nonce) internal view returns (SafetyGate.EntryStatus) {
+        return gate.getCheckIn(nonce).status;
     }
 
     function _caseAction(uint8 action, uint8 reason, bytes32 scope) internal returns (SafetyGate.CaseAction memory) {
@@ -267,7 +280,7 @@ contract SafetyGateTest is Test {
         bytes32 past = _submitCheckIn(true, true, true);
         bytes32 role = gate.GATE_DEVICE_ROLE();
         vm.prank(contractorAdmin);
-        gate.revokeSigner(role, device);
+        gate.revokeSigner(role, device, 1);
 
         bytes32 nonce = _nonce();
         SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
@@ -322,9 +335,9 @@ contract SafetyGateTest is Test {
         gate.submitCheckIn(c, sig);
     }
 
-    function test_checkIn_backdatedOneDayRejected() public {
+    function test_checkIn_backdatedOverOneDayRejected() public {
         SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
-        c.timestamp = uint64(block.timestamp - 1 days); // "어제 점검했다"고 지금 기록
+        c.timestamp = uint64(block.timestamp - 1 days - 1); // 24시간 넘게 지난 기록 = 명백한 소급
         bytes memory sig = _signCheckIn(c, devicePk);
         vm.expectRevert(
             abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, c.timestamp, uint64(block.timestamp))
@@ -364,6 +377,7 @@ contract SafetyGateTest is Test {
     // ==================================================================
 
     function test_override_supervisorRecordsReason_andStatsCount() public {
+        _assess(true);
         bytes32 target = _submitCheckIn(false, true, true); // AI가 안전모 미착용 판정
         SafetyGate.Override memory o = _override(target, 1);
         gate.submitOverride(o, _signOverride(o, supervisorPk));
@@ -377,6 +391,7 @@ contract SafetyGateTest is Test {
     }
 
     function test_override_deviceKeyCannotOverride() public {
+        _assess(true);
         bytes32 target = _submitCheckIn(false, true, true);
         SafetyGate.Override memory o = _override(target, 1);
         bytes memory sig = _signOverride(o, devicePk);
@@ -401,6 +416,7 @@ contract SafetyGateTest is Test {
     }
 
     function test_override_onlyOnce() public {
+        _assess(true);
         bytes32 target = _submitCheckIn(true, false, true);
         SafetyGate.Override memory o1 = _override(target, 3);
         gate.submitOverride(o1, _signOverride(o1, supervisorPk));
@@ -629,5 +645,301 @@ contract SafetyGateTest is Test {
             abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, a.timestamp, uint64(block.timestamp))
         );
         gate.submitCaseAction(a, sig);
+    }
+
+    // ==================================================================
+    // 6. 기록 누락 탐지: 기기 일련번호 (3회차 멘토링 Q4)
+    // ==================================================================
+
+    function _submitWithSeq(uint64 seq) internal returns (bytes32 nonce) {
+        nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
+        c.deviceSeq = seq;
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+    }
+
+    function test_seq_noGap_noMissing() public {
+        _submitWithSeq(1);
+        _submitWithSeq(2);
+        _submitWithSeq(3);
+        SafetyGate.DeviceStats memory d = gate.getDeviceStats(device);
+        assertEq(d.highestSeq, 3);
+        assertEq(d.received, 3);
+        assertEq(gate.missingCount(device), 0);
+    }
+
+    function test_seq_selectiveOmission_showsMissing() public {
+        // 1~10번 중 불합격 4·7·9번을 시공사가 빼고 제출
+        for (uint64 i = 1; i <= 10; i++) {
+            if (i == 4 || i == 7 || i == 9) continue;
+            _submitWithSeq(i);
+        }
+        assertEq(gate.getDeviceStats(device).highestSeq, 10);
+        assertEq(gate.missingCount(device), 3);
+    }
+
+    function test_seq_gapEmitsEvent() public {
+        _submitWithSeq(1);
+        bytes32 nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
+        c.deviceSeq = 5;
+        bytes memory sig = _signCheckIn(c, devicePk);
+        vm.expectEmit(true, false, false, true, address(gate));
+        emit SafetyGate.SequenceGap(device, 2, 4);
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_seq_lateArrivalFillsGap() public {
+        // 오프라인으로 3·4번이 늦게 도착해도 누락 계산이 맞다
+        _submitWithSeq(1);
+        _submitWithSeq(2);
+        _submitWithSeq(5);
+        assertEq(gate.missingCount(device), 2);
+        vm.warp(block.timestamp + 30 minutes);
+        SafetyGate.CheckIn memory c3 = _checkIn(_nonce(), true, true, true);
+        c3.deviceSeq = 3;
+        c3.timestamp = uint64(block.timestamp - 30 minutes);
+        gate.submitCheckIn(c3, _signCheckIn(c3, devicePk));
+        SafetyGate.CheckIn memory c4 = _checkIn(_nonce(), true, true, true);
+        c4.deviceSeq = 4;
+        c4.timestamp = uint64(block.timestamp - 30 minutes);
+        gate.submitCheckIn(c4, _signCheckIn(c4, devicePk));
+        assertEq(gate.getDeviceStats(device).highestSeq, 5);
+        assertEq(gate.missingCount(device), 0);
+    }
+
+    function test_seq_duplicateRejected() public {
+        // 같은 번호를 두 번 써서 누락을 메우는 것 방지
+        _submitWithSeq(1);
+        bytes32 nonce = _nonce();
+        SafetyGate.CheckIn memory c = _checkIn(nonce, true, true, true);
+        c.deviceSeq = 1;
+        bytes memory sig = _signCheckIn(c, devicePk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.DuplicateSequence.selector, device, 1));
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_seq_zeroRejected() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.deviceSeq = 0;
+        bytes memory sig = _signCheckIn(c, devicePk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidSequence.selector, 0));
+        gate.submitCheckIn(c, sig);
+    }
+
+    function test_seq_trackedPerDevice() public {
+        uint256 device2Pk = 0xD2;
+        address device2 = vm.addr(device2Pk);
+        _registerSigner(gate.GATE_DEVICE_ROLE(), device2, inspectorPk);
+        _submitWithSeq(1);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.deviceSeq = 1; // 기기마다 번호가 따로 시작
+        gate.submitCheckIn(c, _signCheckIn(c, device2Pk));
+        assertEq(gate.getDeviceStats(device).received, 1);
+        assertEq(gate.getDeviceStats(device2).received, 1);
+    }
+
+    // ==================================================================
+    // 7. 서명자 해제: 사유 코드 필수 + 이력 공개 (Q4)
+    // ==================================================================
+
+    function test_revoke_recordsReasonAndLastSeq() public {
+        _submitWithSeq(1);
+        _submitWithSeq(2);
+        _submitWithSeq(4); // 3번 누락
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(contractorAdmin);
+        gate.revokeSigner(role, device, 2); // 기기 고장·교체
+
+        SafetyGate.Revocation[] memory r = gate.getRevocations();
+        assertEq(r.length, 1);
+        assertEq(r[0].account, device);
+        assertEq(r[0].role, role);
+        assertEq(r[0].reasonCode, 2);
+        assertEq(r[0].revokedBy, contractorAdmin);
+        assertEq(r[0].revokedAt, block.timestamp);
+        assertEq(r[0].lastSeq, 4);
+        assertEq(r[0].missingAtRevoke, 1);
+        assertFalse(gate.hasRole(role, device));
+    }
+
+    function test_revoke_reasonRequired() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.startPrank(contractorAdmin);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 0));
+        gate.revokeSigner(role, device, 0);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 4));
+        gate.revokeSigner(role, device, 4);
+        vm.stopPrank();
+    }
+
+    function test_revoke_inactiveSignerRejected() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(contractorAdmin);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.SignerNotActive.selector, role, attacker));
+        gate.revokeSigner(role, attacker, 1);
+    }
+
+    function test_revoke_onlyContractorAdmin() public {
+        bytes32 role = gate.GATE_DEVICE_ROLE();
+        vm.prank(attacker);
+        vm.expectRevert();
+        gate.revokeSigner(role, device, 1);
+    }
+
+    // ==================================================================
+    // 8. 출입 순서 강제: 위험성평가가 있어야 출입 허가 (Q5)
+    // ==================================================================
+
+    function test_entry_noAssessment_heldButRecorded() public {
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+        assertFalse(gate.isEntryAllowed(nonce));
+        assertEq(gate.getSiteStats(SITE_ID).checkIns, 1); // 시도 기록은 남는다
+        assertEq(gate.getSiteStats(SITE_ID).held, 1);
+    }
+
+    function test_entry_assessmentHazardsNotControlled_held() public {
+        _assess(false);
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+    }
+
+    function test_entry_assessmentThenPass_granted() public {
+        _assess(true);
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.Granted));
+        assertTrue(gate.isEntryAllowed(nonce));
+    }
+
+    function test_entry_latestAssessmentWins() public {
+        _assess(true);
+        _assess(false); // 오후에 위험요인 미조치로 다시 제출
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+    }
+
+    function test_entry_assessmentOfOtherSite_doesNotCount() public {
+        // 다른 현장의 평가로 이 현장 출입을 열 수 없다
+        SafetyGate.SiteRecord memory r = _siteRecord(_nonce());
+        r.siteId = keccak256("site-2");
+        gate.submitSiteRecord(r, _signSiteRecord(r, supervisorPk));
+        bytes32 nonce = _submitCheckIn(true, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.HeldNoAssessment));
+    }
+
+    function test_entry_failWithAssessment_denied() public {
+        _assess(true);
+        bytes32 nonce = _submitCheckIn(false, true, true);
+        assertEq(uint8(_status(nonce)), uint8(SafetyGate.EntryStatus.Denied));
+        assertFalse(gate.isEntryAllowed(nonce));
+    }
+
+    function test_entry_deniedThenOverride_allowed() public {
+        _assess(true);
+        bytes32 nonce = _submitCheckIn(false, true, true);
+        SafetyGate.Override memory o = _override(nonce, 1);
+        gate.submitOverride(o, _signOverride(o, supervisorPk));
+        assertTrue(gate.isEntryAllowed(nonce));
+    }
+
+    function test_override_cannotBypassMissingAssessment() public {
+        bytes32 nonce = _submitCheckIn(false, true, true); // 평가 전 + 보호구 불합격
+        SafetyGate.Override memory o = _override(nonce, 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafetyGate.CheckInNotOverridable.selector, nonce, SafetyGate.EntryStatus.HeldNoAssessment
+            )
+        );
+        gate.submitOverride(o, sig);
+        assertFalse(gate.isEntryAllowed(nonce));
+    }
+
+    // ==================================================================
+    // 9. 거부 대신 저장 후 분류 + 기록별 시간 기준 (Q1·Q2)
+    // ==================================================================
+
+    function test_checkIn_lateWithin24h_storedAsAuditOnly() public {
+        _assess(true);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        bytes memory sig = _signCheckIn(c, devicePk);
+        vm.warp(block.timestamp + 30 minutes); // 통신 장애로 30분 뒤 재전송
+        gate.submitCheckIn(c, sig);
+        assertEq(uint8(_status(c.nonce)), uint8(SafetyGate.EntryStatus.LateAuditOnly));
+        assertFalse(gate.isEntryAllowed(c.nonce)); // 검사 사실은 남지만 출입 근거는 아님
+        assertEq(gate.getSiteStats(SITE_ID).late, 1);
+        assertEq(gate.getCheckIn(c.nonce).anchoredAt, block.timestamp);
+    }
+
+    function test_checkIn_onTimeEdgeIsNotLate() public {
+        _assess(true);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.timestamp = uint64(block.timestamp - 10 minutes);
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+        assertEq(uint8(_status(c.nonce)), uint8(SafetyGate.EntryStatus.Granted));
+
+        SafetyGate.CheckIn memory c2 = _checkIn(_nonce(), true, true, true);
+        c2.timestamp = uint64(block.timestamp - 10 minutes - 1);
+        gate.submitCheckIn(c2, _signCheckIn(c2, devicePk));
+        assertEq(uint8(_status(c2.nonce)), uint8(SafetyGate.EntryStatus.LateAuditOnly));
+    }
+
+    function test_checkIn_exactly24hAcceptedAsLate() public {
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), true, true, true);
+        c.timestamp = uint64(block.timestamp - 1 days);
+        gate.submitCheckIn(c, _signCheckIn(c, devicePk));
+        assertEq(uint8(_status(c.nonce)), uint8(SafetyGate.EntryStatus.LateAuditOnly));
+    }
+
+    function test_override_cannotApplyToLateRecord() public {
+        _assess(true);
+        SafetyGate.CheckIn memory c = _checkIn(_nonce(), false, true, true);
+        bytes memory sig = _signCheckIn(c, devicePk);
+        vm.warp(block.timestamp + 30 minutes);
+        gate.submitCheckIn(c, sig);
+        SafetyGate.Override memory o = _override(c.nonce, 1);
+        bytes memory osig = _signOverride(o, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafetyGate.CheckInNotOverridable.selector, c.nonce, SafetyGate.EntryStatus.LateAuditOnly
+            )
+        );
+        gate.submitOverride(o, osig);
+    }
+
+    function test_siteRecord_within1hAccepted_beyondRejected() public {
+        SafetyGate.SiteRecord memory r = _siteRecord(_nonce());
+        r.timestamp = uint64(block.timestamp - 50 minutes);
+        gate.submitSiteRecord(r, _signSiteRecord(r, supervisorPk));
+
+        SafetyGate.SiteRecord memory r2 = _siteRecord(_nonce());
+        r2.timestamp = uint64(block.timestamp - 1 hours - 1);
+        bytes memory sig = _signSiteRecord(r2, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, r2.timestamp, uint64(block.timestamp))
+        );
+        gate.submitSiteRecord(r2, sig);
+    }
+
+    function test_caseAction_within1hAccepted() public {
+        _act(1, 0, SCOPE, supervisorPk);
+        SafetyGate.CaseAction memory a = _caseAction(2, 0, SCOPE);
+        a.timestamp = uint64(block.timestamp - 50 minutes); // 승인 서명 후 50분 뒤 제출
+        gate.submitCaseAction(a, _signCaseAction(a, inspectorPk));
+        assertEq(uint8(gate.getCase(CASE_ID).status), uint8(SafetyGate.CaseStatus.InspectorApproved));
+    }
+
+    function test_override_beyond1hRejected() public {
+        _assess(true);
+        bytes32 target = _submitCheckIn(false, true, true);
+        SafetyGate.Override memory o = _override(target, 1);
+        o.timestamp = uint64(block.timestamp - 1 hours - 1);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(
+            abi.encodeWithSelector(SafetyGate.StaleTimestamp.selector, o.timestamp, uint64(block.timestamp))
+        );
+        gate.submitOverride(o, sig);
     }
 }

@@ -68,14 +68,14 @@ def download(url: str, dest: Path):
 def load_images(splits):
     z = DATA / "construction-ppe.zip"
     download(DATA_URL, z)
-    root = DATA / "construction-ppe"
-    if not root.exists():
+    if not (DATA / "images").exists() and not (DATA / "construction-ppe" / "images").exists():
         print("압축 푸는 중...")
         with zipfile.ZipFile(z) as f:
             f.extractall(DATA)
+    root = DATA / "construction-ppe" if (DATA / "construction-ppe" / "images").exists() else DATA
     out = []
     for split in splits:
-        imgs = [p for p in root.rglob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png")
+        imgs = [p for p in (root / "images" / split).glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png")
                 and (f"/images/{split}/" in str(p) or f"/{split}/images/" in str(p))]
         if not imgs:
             print(f"  '{split}' 분할 사진을 못 찾았다 (폴더 구조 확인 필요)")
@@ -162,6 +162,8 @@ def main():
         download(url, dest)
     images = load_images(a.splits.split(","))
     print(f"평가 사진 {len(images)}장")
+    if not images:
+        sys.exit("평가할 사진이 없다. gate/eval_data 폴더 구조를 확인")
 
     sys.path.insert(0, str(HERE))
     import vision

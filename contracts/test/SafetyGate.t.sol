@@ -434,6 +434,30 @@ contract SafetyGateTest is Test {
         gate.submitOverride(o, sig);
     }
 
+    // 멘토링 4회차 Q3: AI 점수가 감독자 확인 구간이면 불합격으로 기록되고, 감독자는 "AI 저신뢰" 사유로 Override한다
+    function test_override_aiLowConfidenceReason() public {
+        _assess(true);
+        bytes32 target = _submitCheckIn(false, true, true); // 감독자 확인 구간 → 안전모 불합격으로 기록
+        assertEq(gate.OVERRIDE_AI_LOW_CONFIDENCE(), 4);
+        SafetyGate.Override memory o = _override(target, 4);
+        gate.submitOverride(o, _signOverride(o, supervisorPk));
+
+        SafetyGate.StoredCheckIn memory s = gate.getCheckIn(target);
+        assertTrue(s.overridden);
+        assertEq(s.overrideReason, 4);
+        assertFalse(s.data.helmetPass); // 원래 AI 판정은 그대로 남는다
+        assertTrue(gate.isEntryAllowed(target));
+        assertEq(gate.getSiteStats(SITE_ID).overrides, 1);
+    }
+
+    function test_override_reasonAboveMaxRejected() public {
+        bytes32 target = _submitCheckIn(false, true, true);
+        SafetyGate.Override memory o = _override(target, 5);
+        bytes memory sig = _signOverride(o, supervisorPk);
+        vm.expectRevert(abi.encodeWithSelector(SafetyGate.InvalidReason.selector, 5));
+        gate.submitOverride(o, sig);
+    }
+
     function test_override_unknownCheckInRejected() public {
         bytes32 missing = keccak256("missing");
         SafetyGate.Override memory o = _override(missing, 1);

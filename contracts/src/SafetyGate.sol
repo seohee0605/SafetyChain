@@ -65,7 +65,8 @@ contract SafetyGate is AccessControl, EIP712 {
     uint8 public constant OVERRIDE_FALSE_POSITIVE = 1; // AI 오탐 (육안 확인 결과 착용)
     uint8 public constant OVERRIDE_CAMERA_FAULT = 2; // 카메라·조명 문제로 판정 불가
     uint8 public constant OVERRIDE_REINSPECTED = 3; // 현장에서 보호구 재착용 후 재확인
-    uint8 public constant OVERRIDE_REASON_MAX = 3;
+    uint8 public constant OVERRIDE_AI_LOW_CONFIDENCE = 4; // AI 저신뢰: 점수가 감독자 확인 구간, 육안 확인 결과 착용
+    uint8 public constant OVERRIDE_REASON_MAX = 4;
 
     /// @notice Case 행위 코드.
     uint8 public constant ACTION_SUBMIT = 1; // 시공사 감독자 제출

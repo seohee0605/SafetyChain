@@ -37,6 +37,7 @@ OVERRIDE_REASONS = {
     1: "AI 오탐 (육안 확인 결과 착용)",
     2: "카메라·조명 문제로 판정 불가",
     3: "보호구 재착용 후 재확인",
+    4: "AI 저신뢰 (감독자 확인 구간, 육안 확인 결과 착용)",  # 컨트랙트 OVERRIDE_AI_LOW_CONFIDENCE
 }
 REJECT_REASONS = {
     1: "기록 누락",

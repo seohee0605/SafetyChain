@@ -5,7 +5,8 @@
 
 한 번의 검사 흐름:
   1. 시공사 백엔드에 QR 확인 요청 (QR이 이 근로자·현장 것인지, 만료됐는지, 동의했는지)
-  2. YOLO로 안전모·안전화 판정, 사진 SHA-256
+  2. YOLO로 안전모·안전화 3단계 판정(통과/감독자 확인/불합격). 감독자 확인 구간의 안전화는 감독자 육안 체크값, 사진 SHA-256
+     (키오스크는 촬영 직후 /preview로 AI 1차 의견을 받아 감독자에게 보여준다. 미리보기는 서명·기록하지 않음)
   3. 기기 키로 EIP-712 서명 (QR 발급·만료 시각 + 기기 일련번호 포함)
   4. 체인 제출 "전에" 서명 사본을 감리 감사 저장소로 직접 전송
   5. 시공사 릴레이에 제출을 맡김 (가스는 시공사가 냄)
@@ -187,7 +188,8 @@ def _send_to_audit(checkin_json: dict, signature: bytes) -> bool:
 # ----------------------------------------------------------------------
 
 
-def _steps(image_bytes, nonce, alcohol_pass, worker_id, site_id, work_date, signed_minutes_ago):
+def _steps(frames, nonce, alcohol_pass, shoes_pass, worker_id, site_id, work_date, signed_minutes_ago):
+    """frames: 1초 동안 찍은 사진 바이트 목록 (3~5장, 모든 프레임이 통과해야 통과 — vision.check_frames)."""
     yield {"stage": "inspecting"}
     # 1) 시공사 백엔드에 QR 확인 (시연용 '오프라인 재전송'이면 QR도 그만큼 이전에 쓴 것으로 맞춘다)
     prep = _post_json(
@@ -195,12 +197,20 @@ def _steps(image_bytes, nonce, alcohol_pass, worker_id, site_id, work_date, sign
         {"nonce": nonce, "workerId": worker_id, "siteId": site_id, "workDate": work_date,
          "signedMinutesAgo": signed_minutes_ago},
     )
-    # 2) 판정
-    with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
-        tmp.write(image_bytes)
-        tmp.flush()
-        ppe = vision.check_ppe(tmp.name)
+    # 2) 판정 (모든 프레임을 판정해 가장 나쁜 프레임을 따른다)
+    with tempfile.TemporaryDirectory() as d:
+        paths = []
+        for i, b in enumerate(frames):
+            path = os.path.join(d, f"frame{i}.jpg")
+            with open(path, "wb") as f:
+                f.write(b)
+            paths.append(path)
+        ppe = vision.check_frames(paths)
+    # 증빙 사진 = 판정을 가른 프레임 (안전모 점수가 가장 낮은 프레임). 이 사진의 해시가 체인에 남는다
+    image_bytes = frames[ppe["worstIndex"]]
     evidence = hashlib.sha256(image_bytes).digest()
+    # 안전화: AI 자동 구간이면 AI 결과, 감독자 확인 구간이면 감독자 육안 체크값 (지금 정책은 전부 감독자 확인)
+    shoes_final = {"pass": True, "deny": False}.get(ppe["shoesDecision"], shoes_pass)
 
     yield {"stage": "signing"}
     seq = _next_seq()
@@ -210,7 +220,7 @@ def _steps(image_bytes, nonce, alcohol_pass, worker_id, site_id, work_date, sign
         "workerId": bytes.fromhex(prep["workerId"][2:]),
         "siteId": bytes.fromhex(prep["siteId"][2:]),
         "helmetPass": ppe["helmetPass"],
-        "shoesPass": ppe["shoesPass"],
+        "shoesPass": shoes_final,
         "alcoholPass": alcohol_pass,
         "modelHash": vision.get_model_hash(),
         "evidenceHash": evidence,
@@ -235,8 +245,22 @@ def _steps(image_bytes, nonce, alcohol_pass, worker_id, site_id, work_date, sign
         "image",
         image_bytes,
     )
-    result = {**relayed, "deviceSeq": seq, "auditDelivered": audit_delivered}
+    ai = {"helmetDecision": ppe["helmetDecision"], "helmetScore": ppe["helmetScore"],
+          "shoesDecision": ppe["shoesDecision"], "shoesScoreAI": ppe["shoesScoreAI"],
+          "shoesOpinion": ppe["shoesOpinion"], "person": ppe["person"],
+          "shoesPassBy": "supervisor" if ppe["shoesDecision"] == "supervisor" else "ai",
+          "frameCount": ppe["frameCount"], "enoughFrames": ppe["enoughFrames"], "frames": ppe["frames"],
+          "evidenceFrame": ppe["worstIndex"]}
+    result = {**relayed, "deviceSeq": seq, "auditDelivered": audit_delivered, "ai": ai}
     yield {"stage": "confirmed" if relayed.get("anchored") else "not_anchored", "result": result}
+
+
+def _read_frames(images: list[UploadFile]) -> list[bytes]:
+    """같은 'image' 필드로 여러 장(1~5)을 받는다. 3장 미만이면 vision이 자동 통과를 막는다."""
+    max_frames = vision.get_policy()["frames"]["max"]
+    if not 1 <= len(images) <= max_frames:
+        raise HTTPException(400, f"image는 1~{max_frames}장이어야 한다")
+    return [im.file.read() for im in images]
 
 
 def _validate(nonce: str, signed_minutes_ago: int) -> None:
@@ -250,9 +274,10 @@ def _validate(nonce: str, signed_minutes_ago: int) -> None:
 
 @app.post("/check")
 def check(
-    image: UploadFile = File(...),
+    image: list[UploadFile] = File(...),  # 1초 동안 찍은 3~5장 (같은 필드 이름으로 여러 개)
     nonce: str = Form(...),
     alcoholPass: bool = Form(...),
+    shoesPass: bool = Form(...),  # 감독자가 키오스크에서 체크한 "작업화 확인" (감독자 확인 구간일 때만 쓰임)
     workerId: str = Form(...),
     siteId: str = Form(...),
     workDate: str = Form(...),
@@ -260,7 +285,7 @@ def check(
 ):
     _validate(nonce, signedMinutesAgo)
     try:
-        for step in _steps(image.file.read(), nonce, alcoholPass, workerId, siteId, workDate, signedMinutesAgo):
+        for step in _steps(_read_frames(image), nonce, alcoholPass, shoesPass, workerId, siteId, workDate, signedMinutesAgo):
             if "result" in step:
                 return step["result"]
     except GateError as e:
@@ -269,9 +294,10 @@ def check(
 
 @app.post("/check/stream")
 def check_stream(
-    image: UploadFile = File(...),
+    image: list[UploadFile] = File(...),  # 1초 동안 찍은 3~5장 (같은 필드 이름으로 여러 개)
     nonce: str = Form(...),
     alcoholPass: bool = Form(...),
+    shoesPass: bool = Form(...),  # 감독자가 키오스크에서 체크한 "작업화 확인" (감독자 확인 구간일 때만 쓰임)
     workerId: str = Form(...),
     siteId: str = Form(...),
     workDate: str = Form(...),
@@ -280,11 +306,11 @@ def check_stream(
     """단계마다 한 줄씩(NDJSON) 보내 키오스크가 진행 상황을 보여준다.
     판정 결과는 체인 확정(또는 미확정) 뒤에만 나간다 (Gatekeeper)."""
     _validate(nonce, signedMinutesAgo)
-    image_bytes = image.file.read()
+    frames = _read_frames(image)
 
     def lines():
         try:
-            for step in _steps(image_bytes, nonce, alcoholPass, workerId, siteId, workDate, signedMinutesAgo):
+            for step in _steps(frames, nonce, alcoholPass, shoesPass, workerId, siteId, workDate, signedMinutesAgo):
                 yield json.dumps(step, ensure_ascii=False) + "\n"
         except GateError as e:
             yield json.dumps({"stage": "error", "detail": str(e)}, ensure_ascii=False) + "\n"
@@ -294,10 +320,20 @@ def check_stream(
     return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
+@app.post("/preview")
+def preview(image: UploadFile = File(...)):
+    """촬영 직후 AI 1차 의견 (서명·기록·일련번호 소진 없음). 감독자가 육안 확인할 때 참고한다.
+    출입 판정은 /check에서 같은 사진으로 다시 계산한 값으로만 정해진다."""
+    with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
+        tmp.write(image.file.read())
+        tmp.flush()
+        return vision.check_ppe(tmp.name)
+
+
 @app.get("/model")
 def model():
-    """지금 게이트가 쓰는 AI 모델 해시. 검증뷰가 판정 당시 modelHash와 비교한다."""
-    return {"modelHash": _hex(vision.get_model_hash())}
+    """지금 게이트가 쓰는 policyHash(가중치 + 임계값). 검증뷰가 판정 당시 modelHash와 비교한다."""
+    return {"modelHash": _hex(vision.get_model_hash()), "policy": vision.get_policy()}
 
 
 @app.get("/health")

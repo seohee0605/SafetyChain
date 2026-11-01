@@ -20,6 +20,27 @@ type GateResult = {
   entryAllowed: boolean
   deviceSeq: number
   auditDelivered: boolean
+  // 게이트 AI 판정 정보. 안전모·안전화 모두 3단계 (안전화는 지금 정책상 전부 감독자 확인)
+  ai?: {
+    helmetDecision: Decision
+    helmetScore: number
+    shoesDecision: Decision
+    shoesScoreAI: number | null
+    shoesOpinion: ShoesOpinion | null
+    person: boolean
+    shoesPassBy: 'ai' | 'supervisor'
+  }
+}
+type Decision = 'pass' | 'supervisor' | 'deny'
+type ShoesOpinion = 'looks_work' | 'not_work_like'
+// 촬영 직후 게이트 /preview 결과 (서명·기록 없음, 감독자 참고용)
+type AiPreview = {
+  person: boolean
+  helmetDecision: Decision
+  helmetScore: number
+  shoesDecision: Decision
+  shoesScoreAI: number | null
+  shoesOpinion: ShoesOpinion | null
 }
 type Reason = { code: number; label: string }
 type Admin = { name: string; address: string }
@@ -42,6 +63,8 @@ const today = () => new Date().toISOString().slice(0, 10)
 // 데모 영상 촬영용: 주소 끝에 ?demo 를 붙이면 웹캠 대신 준비된 사진을 쓴다 (판정은 실제 백엔드)
 const DEMO_MODE = new URLSearchParams(window.location.search).has('demo')
 const DEMO_CAPTURE_IMAGE = '/demo-helmet.jpg'
+const FRAME_COUNT = 4 // 1초 동안 찍을 장수 (게이트 정책: 3~5장, 모두 통과해야 통과)
+const FRAME_INTERVAL_MS = 250
 
 export default function Gate() {
   const [workerId, setWorkerId] = useState('')
@@ -55,7 +78,11 @@ export default function Gate() {
   const [scanning, setScanning] = useState(false)
   const [scannedNonce, setScannedNonce] = useState<string | null>(null)
   const [alcoholPass, setAlcoholPass] = useState(true)
-  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null)
+  const [shoesPass, setShoesPass] = useState(false) // 감독자 육안 확인. 기본은 미확인(불합격)
+  const [aiPreview, setAiPreview] = useState<AiPreview | null>(null)
+  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null) // 첫 프레임 (미리보기·AI 1차 의견용)
+  const [capturedFrames, setCapturedFrames] = useState<Blob[]>([])
+  const [capturing, setCapturing] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [stage, setStage] = useState<Stage | null>(null)
   const [result, setResult] = useState<GateResult | null>(null)
@@ -115,12 +142,15 @@ export default function Gate() {
     setQrImageUrl(null)
     setScannedNonce(null)
     setCapturedBlob(null)
+    setCapturedFrames([])
     setPreviewUrl(null)
     setStage(null)
     setResult(null)
     setOverrideResult(null)
     setShowOverride(false)
     setAlcoholPass(true)
+    setShoesPass(false)
+    setAiPreview(null)
     setError(null)
   }
 
@@ -207,38 +237,65 @@ export default function Gate() {
     scanFrameRef.current = requestAnimationFrame(tick)
   }
 
-  async function capture() {
-    if (DEMO_MODE) {
-      const res = await fetch(DEMO_CAPTURE_IMAGE)
-      const blob = await res.blob()
-      setCapturedBlob(blob)
-      setPreviewUrl(URL.createObjectURL(blob))
-      return
+  // 촬영 직후 AI 1차 의견을 받아 감독자에게 보여준다 (출입 판정은 /check에서 다시 계산)
+  async function runPreview(blob: Blob) {
+    setAiPreview(null)
+    try {
+      const form = new FormData()
+      form.append('image', blob, 'capture.jpg')
+      const res = await fetch(`${GATE_URL}/preview`, { method: 'POST', body: form })
+      if (res.ok) setAiPreview(await res.json())
+    } catch {
+      // 미리보기 실패는 출입 흐름을 막지 않는다
     }
+  }
+
+  // 멘토링 4회차 Q3: 1초 동안 FRAME_COUNT장을 찍어 모두 보내고, 게이트는 모든 프레임이 통과해야 통과시킨다
+  function grabFrame(): Promise<Blob | null> {
     const video = videoRef.current
     const canvas = canvasRef.current
-    if (!video || !canvas) return
+    if (!video || !canvas) return Promise.resolve(null)
     canvas.width = video.videoWidth
     canvas.height = video.videoHeight
     canvas.getContext('2d')?.drawImage(video, 0, 0)
-    canvas.toBlob((blob) => {
-      if (!blob) return
-      setCapturedBlob(blob)
-      setPreviewUrl(URL.createObjectURL(blob))
-    }, 'image/jpeg')
+    return new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg'))
+  }
+
+  async function capture() {
+    let frames: Blob[] = []
+    if (DEMO_MODE) {
+      // 시연 모드(웹캠 없음): 준비된 사진 한 장을 프레임 수만큼 보낸다
+      const res = await fetch(DEMO_CAPTURE_IMAGE)
+      const blob = await res.blob()
+      frames = Array.from({ length: FRAME_COUNT }, () => blob)
+    } else {
+      setCapturing(true)
+      for (let i = 0; i < FRAME_COUNT; i++) {
+        const b = await grabFrame()
+        if (b) frames.push(b)
+        if (i < FRAME_COUNT - 1) await new Promise((r) => setTimeout(r, FRAME_INTERVAL_MS))
+      }
+      setCapturing(false)
+    }
+    if (frames.length === 0) return
+    setCapturedFrames(frames)
+    setCapturedBlob(frames[0])
+    setPreviewUrl(URL.createObjectURL(frames[0]))
+    void runPreview(frames[0])
   }
 
   // 백엔드가 단계(검사 → 서명 → 온체인 기록 → 확정)를 끝낼 때마다 한 줄씩 보내준다
   async function submitCheck() {
-    if (!scannedNonce || !capturedBlob) return
+    if (!scannedNonce || capturedFrames.length === 0) return
     setError(null)
     setResult(null)
     setStage('inspecting')
     try {
       const form = new FormData()
-      form.append('image', capturedBlob, 'capture.jpg')
+      capturedFrames.forEach((b, i) => form.append('image', b, `frame${i}.jpg`))
       form.append('nonce', scannedNonce)
       form.append('alcoholPass', String(alcoholPass))
+      form.append('shoesPass', String(shoesPass))
       form.append('workerId', workerId)
       form.append('siteId', siteId)
       form.append('workDate', workDate)
@@ -400,8 +457,8 @@ export default function Gate() {
           <SecondaryButton onClick={startScan} disabled={!qr || scanning}>
             {scanning ? 'QR 스캔 중...' : 'QR 스캔 시작'}
           </SecondaryButton>
-          <SecondaryButton onClick={capture} disabled={!scannedNonce}>
-            촬영
+          <SecondaryButton onClick={capture} disabled={!scannedNonce || capturing}>
+            {capturing ? '촬영 중 (1초)…' : `촬영 (1초 ${FRAME_COUNT}장)`}
           </SecondaryButton>
         </div>
         {scannedNonce && (
@@ -413,7 +470,7 @@ export default function Gate() {
       </Card>
 
       <Card>
-        <StepHeading step={3}>음주 측정</StepHeading>
+        <StepHeading step={3}>감독자 확인 (음주 · 작업화)</StepHeading>
         <label className="flex items-center gap-2.5 text-ink">
           <input
             type="checkbox"
@@ -421,8 +478,41 @@ export default function Gate() {
             onChange={(e) => setAlcoholPass(e.target.checked)}
             className="w-4 h-4 accent-safety-yellow"
           />
-          측정 통과
+          음주 측정 통과
         </label>
+        {aiPreview && (
+          <div className="text-sm border-2 border-charcoal/20 p-3 space-y-1">
+            <p className="font-semibold">AI 1차 의견 (참고)</p>
+            {!aiPreview.person ? (
+              <p>사람이 검출되지 않았습니다. 다시 촬영하세요</p>
+            ) : (
+              <>
+                <p>
+                  안전모:{' '}
+                  {aiPreview.helmetDecision === 'pass' ? '착용으로 보임' : aiPreview.helmetDecision === 'supervisor' ? '확실하지 않음 → 감독자 확인' : '미착용으로 보임'}
+                </p>
+                <p>
+                  안전화: {aiPreview.shoesOpinion === 'looks_work' ? '작업화로 보임' : '작업화로 보이지 않음'}
+                  {aiPreview.shoesDecision === 'supervisor' && ' → 감독자가 확인해 주세요'}
+                </p>
+              </>
+            )}
+          </div>
+        )}
+        <label className="flex items-center gap-2.5 text-ink">
+          <input
+            type="checkbox"
+            checked={shoesPass}
+            onChange={(e) => setShoesPass(e.target.checked)}
+            disabled={!!aiPreview && aiPreview.shoesDecision !== 'supervisor'}
+            className="w-4 h-4 accent-safety-yellow"
+          />
+          작업화 착용 확인 (감독자 육안)
+        </label>
+        <p className="text-xs text-ink-muted">
+          AI가 작업화로 보이는지 1차로 보고, 확실하지 않으면 감독자가 확인합니다. 직접 측정 결과 아직 AI를 믿을 수 있는 구간이 없어
+          지금은 모든 경우 감독자가 체크합니다 (정책 변경은 policyHash로 기록).
+        </p>
         <details className="text-sm text-ink-muted">
           <summary className="cursor-pointer font-semibold select-none">시연: 늦게 도착한 기록 만들기</summary>
           <label className="flex items-center gap-2 mt-2">
@@ -498,7 +588,11 @@ export default function Gate() {
           result={result}
           overrideResult={overrideResult}
           showOverride={showOverride}
-          onShowOverride={() => setShowOverride(true)}
+          onShowOverride={() => {
+            // AI가 감독자 확인 구간으로 판정했으면 사유 기본값을 'AI 저신뢰'(4)로
+            setReasonCode(result?.ai?.helmetDecision === 'supervisor' ? 4 : 1)
+            setShowOverride(true)
+          }}
           onNext={resetForNext}
           error={error}
           overridePanel={
@@ -601,7 +695,9 @@ function ResultScreen(props: {
     title = '출입 불가'
     message = !result.alcoholPass
       ? '음주 측정 불합격입니다. 감독자 확인으로도 출입할 수 없습니다'
-      : '보호구 착용을 확인해 주세요'
+      : result.ai?.helmetDecision === 'supervisor' && !result.helmetPass
+        ? 'AI가 안전모 착용을 확신하지 못했습니다(AI 저신뢰). 감독자가 육안으로 확인해 주세요'
+        : '보호구 착용을 확인해 주세요'
   }
 
   return (
@@ -629,19 +725,19 @@ function ResultScreen(props: {
             <p className="text-lg opacity-90">{message}</p>
             <div className="flex justify-center gap-2 text-sm font-semibold">
               {[
-                ['안전모', result.helmetPass],
-                ['안전화', result.shoesPass],
-                ['음주', result.alcoholPass],
-              ].map(([label, ok]) => (
+                ['안전모', result.helmetPass ? '통과' : result.ai?.helmetDecision === 'supervisor' ? '감독자 확인 필요' : '불합격'],
+                ['안전화', result.shoesPass ? (result.ai?.shoesPassBy === 'ai' ? '통과 (AI)' : '통과 (감독자 확인)') : result.ai?.shoesPassBy === 'ai' ? '불합격' : '미확인'],
+                ['음주', result.alcoholPass ? '통과' : '불합격'],
+              ].map(([label, text]) => (
                 <span key={label as string} className="px-3 py-1.5 border-2 border-current">
-                  {label} {ok ? '통과' : '불합격'}
+                  {label} {text}
                 </span>
               ))}
             </div>
 
             {result.overridable && !overrideResult && !showOverride && (
               <button onClick={onShowOverride} className="underline underline-offset-4 font-semibold">
-                AI 판정이 틀렸나요? 감독자 확인
+                {result.ai?.helmetDecision === 'supervisor' ? '감독자 육안 확인 (AI 저신뢰)' : 'AI 판정이 틀렸나요? 감독자 확인'}
               </button>
             )}
             {result.overridable && !overrideResult && showOverride && overridePanel}

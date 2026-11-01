@@ -243,6 +243,19 @@
   },
   {
     "type": "function",
+    "name": "OVERRIDE_AI_LOW_CONFIDENCE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "OVERRIDE_CAMERA_FAULT",
     "inputs": [],
     "outputs": [

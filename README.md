@@ -1,14 +1,43 @@
+<div align="center">
+
+<img src="assets/mascot.png" alt="SafetyChain 마스코트" width="200">
+
 # SafetyChain
 
 [![CI](https://github.com/seohee0605/SafetyChain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/seohee0605/SafetyChain/actions/workflows/ci.yml)
 
 **AI가 검사하고 블록체인이 지키는 현장 안전기록**
 
+![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636?logo=solidity&logoColor=white)
+![Foundry](https://img.shields.io/badge/Foundry-tested-B8962E)
+![FastAPI](https://img.shields.io/badge/FastAPI-Python%203.11-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=black)
+![YOLO](https://img.shields.io/badge/AI-Ultralytics%20YOLO-111F68)
+![Sepolia](https://img.shields.io/badge/Ethereum-Sepolia-627EEA?logo=ethereum&logoColor=white)
+
+[왜 만들었나](#왜-만들었나) · [아키텍처](#아키텍처) · [기술 스택](#기술-스택) · [폴더 구조](#폴더-구조) · [로컬 실행](#로컬-실행) · [주요 기능](#주요-기능)
+
+</div>
+
+---
+
 건설현장 출입 게이트에서 AI가 안전모·안전화 착용을 판정하고, 그 결과를 게이트 기기의 전자서명(EIP-712)과 함께
 이더리움(Sepolia)에 기록합니다. 시공사가 기록을 빼면 감리 화면에 드러나고, 현장의 하루 기록은
 시공사 → 감리 → 발주처가 각자 서명해야 확정됩니다.
 
 2026 블록체인 AI 융합 해커톤 본선 9팀 블록버스터 (임서희 · 박영서 · 백채원 · 장민준)
+
+### 어떤 위협을 어떻게 막나
+
+| 위협 | 방어 |
+|---|---|
+| 시공사가 불합격·위험 기록을 몰래 뺀다 | 게이트가 서명한 원본을 감리 감사 저장소에 따로 보내고, 게이트 원본 · 시공사 DB · 블록체인을 3자 대조해 미제출을 드러냅니다. 기기별 일련번호(`deviceSeq`)로 빠진 번호도 체인이 공개합니다 |
+| 사고 뒤에 기록을 고쳐 쓴다 | 판정 결과 · 모델 해시 · 사진 해시를 기기 서명과 함께 온체인에 저장하고, 위험성평가는 해시를 남깁니다. 검증뷰가 DB 원본과 사진을 온체인 값과 대조합니다 |
+| 시공사 혼자 기록을 확정한다 | 시공사 제출 → 감리 승인 → 발주처 승인을 각자 MetaMask로 서명해야 확정되고, 서버에는 감리·발주처 키가 없습니다 |
+| 관리자가 권한을 임의로 준다 | `DEFAULT_ADMIN_ROLE`이 아무에게도 없고, 서명자 등록은 시공사 제안 + 감리 또는 발주처 승인이 있어야 합니다 |
+| 오래된 기록·재사용 QR을 끼워 넣는다 | 1회용 nonce, QR 유효기간 최대 5분, 서명 후 3분 이내만 정상, 24시간까지는 감사용 지연 기록, 앞선 시각은 의심 기록으로 분류합니다 |
+| 감독자가 불합격을 그냥 통과시킨다 | 수동 처리는 보호구 불합격만 1회, 사유 코드와 서명이 필요합니다. 음주 불합격 · 평가 전 보류 · 지연 · 의심 기록에는 쓸 수 없고 현장 통계에 집계됩니다 |
+| 개인정보·음주 수치가 새어 나간다 | 음주는 통과 여부(`bool`)만 저장하고, 실명·연락처는 온체인에 올리지 않으며 날짜별 가명만 씁니다 |
 
 ## 현재 상태 (2026-10-28)
 

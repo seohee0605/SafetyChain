@@ -17,6 +17,8 @@ AI 두 가지 모드:
 """
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import secrets
@@ -28,11 +30,15 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from Crypto.Hash import SHA256
+from Crypto.PublicKey import ECC
+from Crypto.Signature import DSS
 from eth_account import Account
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +46,8 @@ STUB_VISION = Path(__file__).resolve().parent / "stub_vision.py"
 
 PORTS = {"anvil": 18545, "backend": 18000, "audit": 18100, "gate": 18200}
 SITE = "E2E-SITE"
+# 근로자 앱 주소 (임시 터널 와일드카드 허용을 같이 검사한다). rpId = 이 주소의 호스트 이름
+WORKER_ORIGIN = "https://e2e-demo.trycloudflare.com"
 SUPERVISOR = "감독자"
 # anvil 기본 계정 0번 (공개된 테스트 키, 로컬 체인 전용). 릴레이 계정으로 가스를 낸다
 ANVIL_KEY0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -96,16 +104,25 @@ def _send(req: urllib.request.Request, timeout: float = 90) -> dict:
         raise HttpError(e.code, body) from e
 
 
-def get(port: int, path: str) -> dict:
-    return _send(urllib.request.Request(f"http://127.0.0.1:{port}{path}"))
+def get(port: int, path: str, headers: dict | None = None) -> dict:
+    return _send(urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers or {}))
 
 
-def post_json(port: int, path: str, body: dict) -> dict:
+def post_json(port: int, path: str, body: dict, headers: dict | None = None) -> dict:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", **(headers or {})}, method="POST",
     )
     return _send(req)
+
+
+def expect_error(status: int, fn, *args, contains: str = "") -> tuple[bool, str]:
+    """요청이 지정한 HTTP 상태로 거부되는지. (통과 여부, 상세)"""
+    try:
+        fn(*args)
+        return False, "거부되지 않음"
+    except HttpError as e:
+        return e.status == status and contains in e.detail, f"{e.status} {e.detail[:60]}"
 
 
 def post_multipart(port: int, path: str, fields: dict, files: list[tuple[str, bytes]]) -> dict:
@@ -284,9 +301,82 @@ def frames(helmet_pass: bool, tag: str) -> list[tuple[str, bytes]]:
     return [("image", marker + f" {tag} frame{i} ".encode() + secrets.token_bytes(8)) for i in range(3)]
 
 
+# ----------------------------------------------------------------------
+# 가짜 패스키 인증기: 아이폰 패스키와 같은 형식(ES256, authenticatorData, clientDataJSON)으로 서명한다.
+# 브라우저 없이 서버의 WebAuthn 검증을 그대로 거친다.
+# ----------------------------------------------------------------------
+
+
+def b64url(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+class FakePasskey:
+    def __init__(self, origin: str = WORKER_ORIGIN):
+        self.key = ECC.generate(curve="P-256")
+        self.credential_id = b64url(secrets.token_bytes(32))
+        self.origin = origin
+
+    def _client_data(self, typ: str, challenge: str, origin: str | None = None) -> bytes:
+        return json.dumps({"type": typ, "challenge": challenge, "origin": origin or self.origin,
+                           "crossOrigin": False}, separators=(",", ":")).encode()
+
+    def _auth_data(self, uv: bool = True, origin: str | None = None) -> bytes:
+        rp_id = urllib.parse.urlparse(origin or self.origin).hostname
+        flags = 0x01 | (0x04 if uv else 0)  # UP + UV(Face ID)
+        return hashlib.sha256(rp_id.encode()).digest() + bytes([flags]) + (0).to_bytes(4, "big")  # 동기화 패스키: 카운터 0
+
+    def attestation(self, challenge: str) -> dict:
+        return {"credentialId": self.credential_id,
+                "publicKey": b64url(self.key.public_key().export_key(format="DER")),
+                "clientDataJSON": b64url(self._client_data("webauthn.create", challenge)),
+                "authenticatorData": b64url(self._auth_data())}
+
+    def assertion(self, challenge: str, uv: bool = True, origin: str | None = None, signer=None) -> dict:
+        cd = self._client_data("webauthn.get", challenge, origin)
+        ad = self._auth_data(uv, origin)
+        digest = SHA256.new(ad + hashlib.sha256(cd).digest())
+        sig = DSS.new(signer or self.key, "fips-186-3", encoding="der").sign(digest)
+        return {"credentialId": self.credential_id, "clientDataJSON": b64url(cd),
+                "authenticatorData": b64url(ad), "signature": b64url(sig)}
+
+
+TOKENS: dict[str, str] = {}  # 사번 → 로그인 세션 토큰
+
+
+def worker_ids(worker: str) -> dict:
+    return {"workerId": worker, "siteId": SITE}
+
+
+def enroll_and_login(worker: str) -> tuple[FakePasskey, str]:
+    """감독자 초대 코드 → 패스키 등록 → 패스키 로그인. (인증기, 토큰)"""
+    b = PORTS["backend"]
+    code = post_json(b, "/worker/invite", {**worker_ids(worker), "supervisorName": SUPERVISOR})["code"]
+    pk = FakePasskey()
+    opt = post_json(b, "/worker/register/options", {**worker_ids(worker), "inviteCode": code})
+    r = post_json(b, "/worker/register", {**worker_ids(worker), "inviteCode": code, **pk.attestation(opt["challenge"])})
+    TOKENS[worker] = r["token"]  # 등록 직후 세션 (Face ID 두 번 띄우지 않음)
+    return pk, r["token"]
+
+
+def login(worker: str, pk: FakePasskey) -> str:
+    b = PORTS["backend"]
+    opt = post_json(b, "/worker/login/options", worker_ids(worker))
+    token = post_json(b, "/worker/login", {**worker_ids(worker), **pk.assertion(opt["challenge"])})["token"]
+    TOKENS[worker] = token
+    return token
+
+
+def auth(worker: str) -> dict:
+    return {"X-Worker-Token": TOKENS[worker]}
+
+
 def issue_qr(worker: str) -> str:
-    post_json(PORTS["backend"], "/consent", {"workerId": worker, "siteId": SITE, "personal": True, "sensitive": True})
-    return post_json(PORTS["backend"], "/qr/issue", {"workerId": worker, "siteId": SITE})["nonce"]
+    if worker not in TOKENS:
+        enroll_and_login(worker)
+    b = PORTS["backend"]
+    post_json(b, "/consent", {**worker_ids(worker), "personal": True, "sensitive": True}, auth(worker))
+    return post_json(b, "/qr/issue", worker_ids(worker), auth(worker))["nonce"]
 
 
 def gate_check(worker: str, nonce: str, helmet_pass: bool, tag: str) -> dict:
@@ -319,6 +409,45 @@ def run_scenarios(ws: Path, audit_grace: int) -> None:
     })
     check(bool(r.get("txHash")), "위험성평가가 체인에 기록됨", r.get("nonce", "")[:12])
 
+    step("2-1. 근로자 패스키: 본인만 자기 QR·기록에 접근")
+    ok, d = expect_error(401, post_json, b, "/qr/issue", worker_ids("W-PASS"))
+    check(ok, "로그인 없이 QR 발급 요청 → 거부", d)
+    code = post_json(b, "/worker/invite", {**worker_ids("W-PASS"), "supervisorName": SUPERVISOR})["code"]
+    ok, d = expect_error(403, post_json, b, "/worker/register/options", {**worker_ids("W-OTHER"), "inviteCode": code})
+    check(ok, "다른 사번으로 초대 코드 사용 → 거부", d)
+    pk = FakePasskey()
+    opt = post_json(b, "/worker/register/options", {**worker_ids("W-PASS"), "inviteCode": code})
+    r = post_json(b, "/worker/register", {**worker_ids("W-PASS"), "inviteCode": code, **pk.attestation(opt["challenge"])})
+    check(r.get("registered") is True and bool(r.get("token")), "초대 코드 + 패스키로 등록 → 바로 세션 발급 (터널 주소 와일드카드 허용)")
+    ok, d = expect_error(403, post_json, b, "/worker/register/options", {**worker_ids("W-PASS"), "inviteCode": code},
+                         contains="already used")
+    check(ok, "초대 코드 재사용 → 거부", d)
+
+    opt = post_json(b, "/worker/login/options", worker_ids("W-PASS"))
+    ok, d = expect_error(403, post_json, b, "/worker/login", {**worker_ids("W-PASS"), **pk.assertion(opt["challenge"], uv=False)})
+    check(ok and "UV" in d, "Face ID 없이(UV 없음) 서명 → 거부", d)
+    opt = post_json(b, "/worker/login/options", worker_ids("W-PASS"))
+    ok, d = expect_error(403, post_json, b, "/worker/login",
+                         {**worker_ids("W-PASS"), **pk.assertion(opt["challenge"], signer=ECC.generate(curve="P-256"))})
+    check(ok, "다른 키로 만든 서명 → 거부", d)
+    opt = post_json(b, "/worker/login/options", worker_ids("W-PASS"))
+    ok, d = expect_error(403, post_json, b, "/worker/login",
+                         {**worker_ids("W-PASS"), **pk.assertion(opt["challenge"], origin="https://evil.example")})
+    check(ok and "origin" in d, "허용하지 않은 주소에서 서명 → 거부", d)
+    opt = post_json(b, "/worker/login/options", worker_ids("W-PASS"))
+    good = pk.assertion(opt["challenge"])
+    token = post_json(b, "/worker/login", {**worker_ids("W-PASS"), **good})["token"]
+    TOKENS["W-PASS"] = token
+    check(bool(token), "정상 패스키 서명으로 로그인")
+    ok, d = expect_error(403, post_json, b, "/worker/login", {**worker_ids("W-PASS"), **good}, contains="already used")
+    check(ok, "같은 서명 재전송(챌린지 재사용) → 거부", d)
+
+    enroll_and_login("W-OTHER")
+    ok, d = expect_error(403, post_json, b, "/qr/issue", worker_ids("W-OTHER"), auth("W-PASS"))
+    check(ok, "내 토큰으로 남의 사번 QR 발급 → 거부 (대리 출입 차단)", d)
+    ok, d = expect_error(403, get, b, f"/worker/{SITE}/W-OTHER/records", auth("W-PASS"))
+    check(ok, "내 토큰으로 남의 출입 기록 조회 → 거부", d)
+
     step("3. 정상 통과 → Granted")
     n_pass = issue_qr("W-PASS")
     r = gate_check("W-PASS", n_pass, True, "pass")
@@ -330,6 +459,9 @@ def run_scenarios(ws: Path, audit_grace: int) -> None:
     check(r.get("entryStatus") == "Granted", "출입 상태 = Granted", str(r.get("entryStatus")))
     check(r.get("auditDelivered") is True, "감리 감사 저장소에 원본 전달됨")
     check(r.get("deviceSeq") == 1, "기기 일련번호 1번", str(r.get("deviceSeq")))
+    mine = get(b, f"/worker/{SITE}/W-PASS/records", auth("W-PASS"))
+    check(len(mine) == 1 and mine[0]["result"] == "pass", "근로자 앱: 본인 기록 조회", str(len(mine)))
+    check(all("alcoholPass" not in x for x in mine), "본인 기록에도 음주 결과 필드 없음")
 
     step("4. 검증뷰: DB·사진 원본을 체인 저장값과 대조")
     v = get(b, f"/verify/{n_pass}")
@@ -440,7 +572,8 @@ def main() -> int:
                         "INSPECTOR_ACCOUNT": f"감리:{inspector.address}", "OWNER_ACCOUNT": f"발주처:{owner.address}",
                         "INSPECTOR_SIGNER": "", "OWNER_SIGNER": "", "INVESTIGATOR_TOKEN": "",
                         "WORKER_PSEUDONYM_KEY": secrets.token_hex(32), "PHOTO_KEY": secrets.token_hex(32),
-                        "AUDIT_URL": urls["audit"], "GATE_URL": urls["gate"], "RECEIPT_TIMEOUT": "20"},
+                        "AUDIT_URL": urls["audit"], "GATE_URL": urls["gate"], "RECEIPT_TIMEOUT": "20",
+                        "WORKER_AUTH": "required", "WORKER_ORIGINS": "https://*.trycloudflare.com"},
             "audit": {**base, "AUDIT_GRACE_SECONDS": str(audit_grace), "CONTRACTOR_URL": urls["backend"]},
             "gate": {**base, "DEVICE_PRIVATE_KEY": key_hex(device), "BACKEND_URL": urls["backend"],
                      "AUDIT_URL": urls["audit"]},

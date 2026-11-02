@@ -18,6 +18,7 @@ from web3.exceptions import ContractCustomError, ContractLogicError
 import chain
 import config
 import db
+import worker_auth
 
 app = FastAPI(title="SafetyChain Backend")
 
@@ -65,6 +66,12 @@ ONCHAIN_ERRORS = (ContractLogicError, ContractCustomError, chain.OnchainRejected
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    worker_auth.init()
+
+
+@app.exception_handler(worker_auth.AuthError)
+def _worker_auth_error(_request, exc: worker_auth.AuthError):
+    return JSONResponse(status_code=exc.status, content={"detail": exc.detail})
 
 
 @app.exception_handler(chain.OnchainPending)
@@ -113,7 +120,9 @@ class QrIssueRequest(BaseModel):
 
 
 @app.post("/qr/issue")
-def issue_qr(req: QrIssueRequest):
+def issue_qr(req: QrIssueRequest, x_worker_token: str | None = Header(None)):
+    # 근로자 본인(패스키 로그인)만 자기 QR을 받는다 → 남의 사번으로 QR을 받아 대리 출입하는 것을 막는다
+    worker_auth.require_worker(x_worker_token, req.workerId, req.siteId)
     # 민감정보 동의 없이는 자동 게이트를 쓸 수 없다 (관리자 대면 확인으로 처리)
     if db.get_consent(req.workerId, req.siteId) is None:
         raise HTTPException(403, "consent required")
@@ -135,7 +144,8 @@ class ConsentRequest(BaseModel):
 
 
 @app.post("/consent")
-def give_consent(req: ConsentRequest):
+def give_consent(req: ConsentRequest, x_worker_token: str | None = Header(None)):
+    worker_auth.require_worker(x_worker_token, req.workerId, req.siteId)
     if not (req.personal and req.sensitive):
         raise HTTPException(400, "both consents are required to use the automated gate")
     agreed_at = db.save_consent(req.workerId, req.siteId, CONSENT_VERSION)
@@ -143,7 +153,8 @@ def give_consent(req: ConsentRequest):
 
 
 @app.get("/consent/{site}/{worker}")
-def get_consent(site: str, worker: str):
+def get_consent(site: str, worker: str, x_worker_token: str | None = Header(None)):
+    worker_auth.require_worker(x_worker_token, worker, site)
     row = db.get_consent(worker, site)
     if row is None:
         return {"agreed": False, "version": CONSENT_VERSION, "agreedAt": None}
@@ -151,13 +162,83 @@ def get_consent(site: str, worker: str):
 
 
 @app.post("/consent/withdraw")
-def withdraw_consent(req: QrIssueRequest):
+def withdraw_consent(req: QrIssueRequest, x_worker_token: str | None = Header(None)):
+    worker_auth.require_worker(x_worker_token, req.workerId, req.siteId)
     db.delete_consent(req.workerId, req.siteId)
     return {"agreed": False}
 
 
+# ======================================================================
+# 근로자 본인 확인: 패스키 (worker_auth.py 참고)
+# ======================================================================
+
+
+class WorkerInviteRequest(BaseModel):
+    workerId: str
+    siteId: str
+    supervisorName: str
+
+
+@app.post("/worker/invite")
+def worker_invite(req: WorkerInviteRequest):
+    """감독자가 현장 등록 때 근로자를 대면 확인하고 일회용 초대 코드를 발급한다 (근로자 폰 등록에 필요)."""
+    if req.supervisorName not in chain.ADMIN_NAMES:
+        raise HTTPException(400, "unknown supervisorName")
+    return worker_auth.issue_invite(req.workerId.strip(), req.siteId.strip(), req.supervisorName)
+
+
+class WorkerRegisterOptionsRequest(BaseModel):
+    workerId: str
+    siteId: str
+    inviteCode: str
+
+
+@app.post("/worker/register/options")
+def worker_register_options(req: WorkerRegisterOptionsRequest):
+    return worker_auth.register_options(req.workerId, req.siteId, req.inviteCode)
+
+
+class WorkerRegisterRequest(WorkerRegisterOptionsRequest):
+    credentialId: str  # base64url
+    publicKey: str  # base64url, SPKI DER (AuthenticatorAttestationResponse.getPublicKey())
+    clientDataJSON: str  # base64url
+    authenticatorData: str  # base64url (getAuthenticatorData())
+
+
+@app.post("/worker/register")
+def worker_register(req: WorkerRegisterRequest):
+    return worker_auth.register(req.workerId, req.siteId, req.inviteCode, req.credentialId, req.publicKey,
+                                req.clientDataJSON, req.authenticatorData)
+
+
+@app.post("/worker/login/options")
+def worker_login_options(req: QrIssueRequest):
+    return worker_auth.login_options(req.workerId, req.siteId)
+
+
+class WorkerLoginRequest(BaseModel):
+    workerId: str
+    siteId: str
+    credentialId: str
+    clientDataJSON: str
+    authenticatorData: str
+    signature: str  # base64url, DER (ES256)
+
+
+@app.post("/worker/login")
+def worker_login(req: WorkerLoginRequest):
+    return worker_auth.login(req.workerId, req.siteId, req.credentialId, req.clientDataJSON,
+                             req.authenticatorData, req.signature)
+
+
+@app.get("/worker/auth-mode")
+def worker_auth_mode():
+    return {"mode": worker_auth.WORKER_AUTH, "origins": worker_auth.WORKER_ORIGINS}
+
+
 @app.get("/worker/{site}/{worker}/records")
-def worker_records(site: str, worker: str):
+def worker_records(site: str, worker: str, x_worker_token: str | None = Header(None)):
+    worker_auth.require_worker(x_worker_token, worker, site)
     out = []
     for c in db.list_checkins_by_worker(worker, site):
         overridden = db.get_override_for_checkin(c["nonce"]) is not None
@@ -168,7 +249,6 @@ def worker_records(site: str, worker: str):
             "result": _worker_result(c["entry_status"], overridden, passed),
             "helmetPass": bool(c["helmet_pass"]),
             "shoesPass": bool(c["shoes_pass"]),
-            "alcoholPass": bool(c["alcohol_pass"]),
             "txHash": c["tx_hash"],
         })
     return out

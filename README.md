@@ -273,7 +273,8 @@ cloudflared tunnel --url http://localhost:5173    # 출력되는 https://xxxx.tr
 - 백엔드 `.env`의 `WORKER_ORIGINS`에 터널 주소 패턴(`https://*.trycloudflare.com`)이 있어야 한다 (기본값에 포함).
 - 예전 방식(사번만으로 QR 발급)이 필요하면 백엔드 `.env`에 `WORKER_AUTH=off`. 이때만 키오스크의 "QR 발급 (예전 방식)"이 동작한다.
 
-데모 영상용 준비 사진 모드는 `?demo`를 붙여서 연다 (`http://localhost:5173/?demo#/gate`).
+데모 영상용 사진 모드는 `?demo`를 붙여서 연다 (`http://localhost:5173/?demo#/gate`). QR은 웹캠으로 근로자 폰을 그대로 스캔하고,
+보호구 촬영만 팀 평가셋 사진으로 대신한다. 시연 도구에서 착용(IMG_2714)·미착용(IMG_2962) 사진을 고르면 게이트의 실제 AI가 판정한다.
 
 ## E2E 스모크 테스트
 

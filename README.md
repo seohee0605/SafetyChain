@@ -1,5 +1,7 @@
 # SafetyChain
 
+[![CI](https://github.com/seohee0605/SafetyChain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/seohee0605/SafetyChain/actions/workflows/ci.yml)
+
 **AI가 검사하고 블록체인이 지키는 현장 안전기록**
 
 건설현장 출입 게이트에서 AI가 안전모·안전화 착용을 판정하고, 그 결과를 게이트 기기의 전자서명(EIP-712)과 함께
@@ -138,13 +140,25 @@ safetychain/
 
 ## 로컬 실행
 
+검증된 개발 환경 버전 (CI도 같은 버전으로 돈다):
+
+| 도구 | 버전 |
+|---|---|
+| Foundry (forge) | 1.8.1 |
+| OpenZeppelin Contracts | v5.7.0 |
+| forge-std | v1.16.2 |
+| Python | 3.11 |
+| Node.js | 26 (`frontend/.nvmrc`) |
+
+파이썬 패키지 버전은 각 서비스의 `requirements.txt`에 고정돼 있다.
+
 ### 1. 컨트랙트
 
 ```bash
 cd contracts
-forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git
+forge install foundry-rs/forge-std@v1.16.2 OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
 anvil                                   # 별도 터미널에서 로컬 체인 실행
-forge test                              # 92개 테스트
+forge test                              # 95개 테스트
 
 # 배포 + 게이트 기기/감독자 등록 "제안" (승인은 배포 후 감리가 감리 감사 화면에서 지갑으로)
 export DEVICE_ADDRESS=0x...             # 게이트 기기 주소 (gate/.env의 DEVICE_PRIVATE_KEY 주소)

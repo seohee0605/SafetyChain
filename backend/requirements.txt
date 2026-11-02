@@ -1,6 +1,6 @@
-fastapi
-uvicorn[standard]
-web3
-eth-account
-pycryptodome
-python-multipart
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+web3==8.0.0
+eth-account==0.14.0
+pycryptodome==3.23.0
+python-multipart==0.0.32

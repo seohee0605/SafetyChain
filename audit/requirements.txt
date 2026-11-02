@@ -1,4 +1,4 @@
-fastapi
-uvicorn[standard]
-web3
-eth-account
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+web3==8.0.0
+eth-account==0.14.0

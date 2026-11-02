@@ -1,6 +1,8 @@
-fastapi
-uvicorn[standard]
-web3
-eth-account
-ultralytics
-python-multipart
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+web3==8.0.0
+eth-account==0.14.0
+ultralytics==8.4.144
+torch==2.14.0
+torchvision==0.29.0
+python-multipart==0.0.32

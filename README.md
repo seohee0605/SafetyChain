@@ -1,8 +1,25 @@
+<div align="center">
+
+<img src="assets/mascot.png" alt="SafetyChain 마스코트" width="200">
+
 # SafetyChain
 
 [![CI](https://github.com/seohee0605/SafetyChain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/seohee0605/SafetyChain/actions/workflows/ci.yml)
 
 **AI가 검사하고 블록체인이 지키는 현장 안전기록**
+
+![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636?logo=solidity&logoColor=white)
+![Foundry](https://img.shields.io/badge/Foundry-tested-B8962E)
+![FastAPI](https://img.shields.io/badge/FastAPI-Python%203.11-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=black)
+![YOLO](https://img.shields.io/badge/AI-Ultralytics%20YOLO-111F68)
+![Sepolia](https://img.shields.io/badge/Ethereum-Sepolia-627EEA?logo=ethereum&logoColor=white)
+
+[왜 만들었나](#왜-만들었나) · [아키텍처](#아키텍처) · [기술 스택](#기술-스택) · [폴더 구조](#폴더-구조) · [로컬 실행](#로컬-실행) · [주요 기능](#주요-기능)
+
+</div>
+
+---
 
 건설현장 출입 게이트에서 AI가 안전모·안전화 착용을 판정하고, 그 결과를 게이트 기기의 전자서명(EIP-712)과 함께
 이더리움(Sepolia)에 기록합니다. 시공사가 기록을 빼면 감리 화면에 드러나고, 현장의 하루 기록은

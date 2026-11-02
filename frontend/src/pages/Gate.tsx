@@ -32,7 +32,11 @@ const maskWorker = (id: string) => (id.length <= 3 ? id[0] + '*'.repeat(Math.max
 
 // 데모 영상 촬영용: 주소 끝에 ?demo 를 붙이면 웹캠 대신 준비된 사진을 쓴다 (판정은 실제 백엔드)
 const DEMO_MODE = new URLSearchParams(window.location.search).has('demo')
-const DEMO_CAPTURE_IMAGE = '/demo-helmet.jpg'
+// ?demo: QR은 웹캠으로 진짜 스캔하고, 보호구 촬영만 팀 평가셋 사진으로 대신한다 (사진도 실제 AI가 판정)
+const DEMO_PHOTOS = [
+  { src: '/demo-helmet.jpg', label: '착용 · IMG_2714 (S01 야외·흐림)' },
+  { src: '/demo-nohelmet.jpg', label: '미착용 · IMG_2962 (S07 야간)' },
+] as const
 const FRAME_COUNT = 4 // 1초 동안 찍을 장수 (게이트 정책: 3~5장, 모두 통과해야 통과)
 const FRAME_INTERVAL_MS = 250
 
@@ -102,6 +106,7 @@ export default function Gate() {
   const [emergencyError, setEmergencyError] = useState<string | null>(null)
   const [showEmergency, setShowEmergency] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
+  const [demoPhoto, setDemoPhoto] = useState<string>(DEMO_PHOTOS[0].src)
   const [signingMode, setSigningMode] = useState<'wallet' | 'server'>('wallet')
   const [siteRecord, setSiteRecord] = useState<SiteRecord | null | undefined>(undefined) // undefined: 아직 모름
   const [showTools, setShowTools] = useState(false)
@@ -245,13 +250,12 @@ export default function Gate() {
   }
 
   async function startCamera() {
-    if (DEMO_MODE) return
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true })
       streamRef.current = stream
       if (videoRef.current) videoRef.current.srcObject = stream
     } catch {
-      setError('웹캠 접근 실패 (권한을 확인하세요)')
+      if (!DEMO_MODE) setError('웹캠 접근 실패 (권한을 확인하세요)')
     }
   }
 
@@ -265,9 +269,9 @@ export default function Gate() {
     setError(null)
     setScanning(true)
 
-    if (DEMO_MODE) {
+    if (DEMO_MODE && qr) {
       setTimeout(() => {
-        if (qr) setScannedNonce(qr.nonce)
+        setScannedNonce(qr.nonce)
         setScanning(false)
       }, 1200)
       return
@@ -328,8 +332,8 @@ export default function Gate() {
   async function capture() {
     let frames: Blob[] = []
     if (DEMO_MODE) {
-      // 시연 모드(웹캠 없음): 준비된 사진 한 장을 프레임 수만큼 보낸다
-      const res = await fetch(DEMO_CAPTURE_IMAGE)
+      // 시연 모드: 고른 평가셋 사진 한 장을 프레임 수만큼 보낸다 (판정은 게이트의 실제 AI)
+      const res = await fetch(demoPhoto)
       const blob = await res.blob()
       frames = Array.from({ length: FRAME_COUNT }, () => blob)
     } else {
@@ -536,6 +540,24 @@ export default function Gate() {
             </div>
           )}
 
+          {DEMO_MODE && (
+            <div className="space-y-1.5">
+              <p className="text-sm font-semibold text-ink">시연 모드 촬영 사진 (팀 평가셋 · 실제 AI가 판정)</p>
+              <div className="flex flex-wrap gap-2">
+                {DEMO_PHOTOS.map((p) => (
+                  <button
+                    key={p.src}
+                    onClick={() => setDemoPhoto(p.src)}
+                    className={`flex items-center gap-2 border-2 border-charcoal px-2 py-1.5 text-sm font-bold ${demoPhoto === p.src ? 'bg-safety-yellow' : 'bg-white'}`}
+                  >
+                    <img src={p.src} alt="" className="w-8 h-10 object-cover border border-charcoal" />
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <label className="flex flex-wrap items-center gap-2 text-sm text-ink-muted">
             늦게 도착한 기록 만들기:
             <Input
@@ -605,7 +627,7 @@ export default function Gate() {
                 QR은 근로자 앱에서 열 수 있어요.
                 <br />한 번만 쓸 수 있고, 발급 후 5분이 지나면 다시 받아야 해요.
               </p>
-              <BigButton onClick={startScan} disabled={scanning || (DEMO_MODE && !qr)} className="sm:w-80">
+              <BigButton onClick={startScan} disabled={scanning} className="sm:w-80">
                 {scanning ? 'QR 찾는 중…' : 'QR 스캔 시작'}
               </BigButton>
               <p className="text-sm text-ink-muted">
@@ -615,8 +637,8 @@ export default function Gate() {
               </p>
             </div>
             <CameraBox className="lg:w-[46%]">
-              {DEMO_MODE ? (
-                qrImageUrl && <img src={qrImageUrl} alt="게이트 카메라가 보는 QR" className="h-3/5 aspect-square object-contain" />
+              {DEMO_MODE && qrImageUrl ? (
+                <img src={qrImageUrl} alt="게이트 카메라가 보는 QR" className="h-3/5 aspect-square object-contain" />
               ) : (
                 <video ref={attachVideo} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover" />
               )}
@@ -640,7 +662,7 @@ export default function Gate() {
                 {step === 2 && previewUrl ? (
                   <img src={previewUrl} alt="촬영한 사진" className="absolute inset-0 w-full h-full object-contain" />
                 ) : DEMO_MODE ? (
-                  <img src={DEMO_CAPTURE_IMAGE} alt="시연용 사진" className="absolute inset-0 w-full h-full object-contain opacity-60" />
+                  <img src={demoPhoto} alt="시연용 평가셋 사진" className="absolute inset-0 w-full h-full object-contain opacity-60" />
                 ) : (
                   <video ref={attachVideo} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover" />
                 )}

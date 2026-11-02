@@ -291,12 +291,15 @@ export function Label({ children, note }: { children: ReactNode; note?: string }
   )
 }
 
-// 시연용 현장·날짜 선택 줄 (여러 화면이 같이 쓴다)
+// 이 기기 시간대 기준 오늘 날짜 (YYYY-MM-DD). toISOString()은 UTC라 한국에서는 오전 9시 전까지 어제 날짜가 나온다
+export const todayLocal = () => new Date().toLocaleDateString('sv-SE')
+
+// 시연용 현장·날짜 선택 줄 (여러 화면이 같이 쓴다). workDate를 안 주면 날짜 칸 없이 현장만 고른다
 export function SitePicker(props: {
   siteId: string
-  workDate: string
+  workDate?: string
   onSite: (v: string) => void
-  onDate: (v: string) => void
+  onDate?: (v: string) => void
   onLoad?: () => void
   loadLabel?: string
 }) {
@@ -309,7 +312,9 @@ export function SitePicker(props: {
         onKeyDown={(e) => e.key === 'Enter' && props.onLoad?.()}
         className="w-28 px-2 py-1 font-bold outline-none"
       />
-      <input type="date" value={props.workDate} onChange={(e) => props.onDate(e.target.value)} className="px-2 py-1 font-bold outline-none" />
+      {props.workDate !== undefined && (
+        <input type="date" value={props.workDate} onChange={(e) => e.target.value && props.onDate?.(e.target.value)} className="px-2 py-1 font-bold outline-none" />
+      )}
       {props.onLoad && (
         <button onClick={props.onLoad} disabled={!props.siteId} className="bg-charcoal text-white px-3 py-1 text-sm font-bold disabled:opacity-35">
           {props.loadLabel ?? '조회'}

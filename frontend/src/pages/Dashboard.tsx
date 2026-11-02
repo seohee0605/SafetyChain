@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { DarkBox, hhmm, SitePicker, TitleBar } from '../components/kiosk'
+import { DarkBox, hhmm, SitePicker, TitleBar, todayLocal } from '../components/kiosk'
 import { ErrorText, Input, SecondaryButton } from '../components/ui'
 import { AUDIT_URL, BACKEND_URL } from '../config'
 
@@ -63,11 +63,13 @@ export default function Dashboard() {
   const [audit, setAudit] = useState<AuditRecord[] | null>(null)
   const [detail, setDetail] = useState<'override' | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [incidentDate, setIncidentDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [incidentDate, setIncidentDate] = useState(todayLocal)
+  const [endDate, setEndDate] = useState(todayLocal)
 
-  const load = useCallback(async (site: string) => {
+  const load = useCallback(async (site: string, end?: string) => {
     setError(null)
-    const res = await fetch(`${BACKEND_URL}/dashboard/${encodeURIComponent(site)}`)
+    const q = end && end !== todayLocal() ? `?end=${end}` : ''
+    const res = await fetch(`${BACKEND_URL}/dashboard/${encodeURIComponent(site)}${q}`)
     if (!res.ok) {
       setError('조회 실패')
       return
@@ -95,9 +97,14 @@ export default function Dashboard() {
   // 시연 중 10초마다 갱신
   useEffect(() => {
     if (!loadedSite) return
-    const id = setInterval(() => load(loadedSite), 10000)
+    const id = setInterval(() => load(loadedSite, endDate), 10000)
     return () => clearInterval(id)
-  }, [loadedSite, load])
+  }, [loadedSite, endDate, load])
+
+  function changeEnd(d: string) {
+    setEndDate(d)
+    if (loadedSite) load(loadedSite, d)
+  }
 
   async function reportIncident() {
     if (!confirm(`${incidentDate}에 사고가 있었다고 기록할까요? 무사고 일수가 이 날짜부터 다시 계산됩니다.`)) return
@@ -110,7 +117,7 @@ export default function Dashboard() {
       setError('사고 기록 실패')
       return
     }
-    await load(siteId)
+    await load(siteId, endDate)
   }
 
   const daily = data?.daily ?? []
@@ -123,8 +130,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-4">
-      <TitleBar title="현장 대시보드" sub="최근 7일">
-        <SitePicker siteId={siteId} workDate={today ?? new Date().toISOString().slice(0, 10)} onSite={setSiteId} onDate={() => {}} onLoad={() => load(siteId)} />
+      <TitleBar title="현장 대시보드" sub={endDate === todayLocal() ? '최근 7일' : `${endDate}까지 7일`}>
+        <SitePicker siteId={siteId} workDate={endDate} onSite={setSiteId} onDate={changeEnd} onLoad={() => load(siteId, endDate)} />
         <span className="bg-charcoal text-white px-3.5 py-2.5 text-sm font-bold">개인 지목 없음 · 현장 단위 집계만 표시</span>
       </TitleBar>
 

@@ -8,6 +8,7 @@ import {
   shortHex,
   SitePicker,
   StepBar,
+  todayLocal,
   TitleBar,
   Warn,
   type StepState,
@@ -65,7 +66,6 @@ type CaseBundle = {
 // 감리 감사 저장소(8100)가 아는 게이트 원본 중 체인에 없는 것 = 누락
 type AuditRecord = { nonce: string; deviceSeq: number; signedAt: number; passed: boolean; audit: string }
 
-const today = () => new Date().toISOString().slice(0, 10)
 const localDate = (sec: number) => new Date(sec * 1000).toLocaleDateString('sv-SE')
 const ZERO_HASH = /^0x0*$/
 const ROLE_LABEL = { contractor: '시공사', inspector: '감리', owner: '발주처' }
@@ -80,7 +80,7 @@ export default function CaseReview() {
   const [rejectMemo, setRejectMemo] = useState('')
   const [rejecting, setRejecting] = useState(false)
   const [siteId, setSiteId] = useState('')
-  const [workDate, setWorkDate] = useState(today())
+  const [workDate, setWorkDate] = useState(todayLocal())
   const [bundle, setBundle] = useState<CaseBundle | null>(null)
   const [check, setCheck] = useState<CaseVerify | null>(null)
   const [missing, setMissing] = useState<AuditRecord[] | null>(null) // null: 감사 저장소에 연결 못 함

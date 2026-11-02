@@ -5,7 +5,7 @@ import { caseIdOf } from '../chain'
 import { Card, ErrorText, Input, Select } from '../components/ui'
 import { BACKEND_URL, GATE_URL } from '../config'
 import { Modal, ModalButtons, OptionList } from './gate/Modal'
-import { StepBar } from '../components/kiosk'
+import { StepBar, todayLocal } from '../components/kiosk'
 import type { Admin, AiPreview, EmergencyResult, GateResult, OverrideResult, QrIssue, Reason, SiteRecord, Stage, VerdictKind } from './gate/types'
 import { verdictOf } from './gate/types'
 import { Verdict } from './gate/Verdict'
@@ -25,7 +25,6 @@ const AUTO_RESET_SEC = 5
 
 // 실제로는 QR은 근로자 폰(#/worker)에, 스캔·촬영은 게이트 태블릿에서 일어난다.
 // 같은 브라우저에서 시연할 때는 '시연 도구'에서 QR을 발급한다.
-const today = () => new Date().toISOString().slice(0, 10)
 const hhmm = (sec: number) => new Date(sec * 1000).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
 // 화면에는 사번을 가려서 보여준다 (예: 20231234 → 20****34)
 const maskWorker = (id: string) => (id.length <= 3 ? id[0] + '*'.repeat(Math.max(0, id.length - 1)) : id.slice(0, 2) + '*'.repeat(id.length - 4) + id.slice(-2))
@@ -71,7 +70,7 @@ function previewResult(kind: VerdictKind): GateResult {
 export default function Gate() {
   const [workerId, setWorkerId] = useState('')
   const [siteId, setSiteId] = useState('')
-  const [workDate, setWorkDate] = useState(today())
+  const [workDate, setWorkDate] = useState(todayLocal())
   const [needsConsent, setNeedsConsent] = useState(false)
   const [consentPersonal, setConsentPersonal] = useState(false)
   const [consentSensitive, setConsentSensitive] = useState(false)

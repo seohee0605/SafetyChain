@@ -65,7 +65,8 @@
   - 평가 스크립트: `gate/eval_selfset.py`(평가셋), `gate/eval_video.py`(1초 4프레임), `gate/eval_ppe.py`·`gate/eval_shoes.py`(공개 데이터)
 - **테스트**: 컨트랙트 테스트 95개(`forge test`) · E2E 스모크 40개(`scripts/e2e/smoke.py`) · 둘 다 CI에서 매번 실행
 - **Sepolia**: `0x3E932e3915e1258f6e1b781112e59744A6847d73` (11/1 재배포: Override 사유 4 "AI 저신뢰" 추가. 이전 배포 `0x082f20bC3dCcFB393bed97Cdc75E6C2DFd2f4d05`).
-  시간 기준(정상 3분, QR 최대 5분)은 Sepolia 실측(출입 기록 32건, 서명 → 블록 포함 중앙 8초·최대 32초)으로 정했습니다.
+  시간 기준(정상 3분, QR 최대 5분, 지연 기록 24시간)은 Sepolia 실측(출입 기록 32건, 서명 → 블록 포함 중앙 8초·최대 32초)으로 정했고,
+  이 배포본에 그대로 들어가 있습니다 (`CHECKIN_ON_TIME`=180, `MAX_QR_TTL`=300, `CHECKIN_LATE_LIMIT`=86400, `OVERRIDE_REASON_MAX`=4).
 - **남은 과제**: 모델·판정 정책 교체를 시공사 제안 → 감리 승인으로 처리하는 절차(4차 제안, 지금은 policyHash 기록·검증까지),
   국내 현장 데이터로 일반 캡 놓침 줄이기, 출입 기록 가스 줄이기(현재 1건 약 140만 gas), 게이트 키를 하드웨어 보안 칩에 두는 구조, 감독자 로그인.
 - **라이선스**: Ultralytics YOLO와 평가에 쓴 Construction-PPE 데이터는 AGPL-3.0입니다. 이 저장소는 공개 저장소라 조건을 충족합니다.

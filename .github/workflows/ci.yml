@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: 컨트랙트 (forge test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: 의존성 설치 (버전 고정)
+        run: >-
+          forge install
+          foundry-rs/forge-std@v1.16.2
+          OpenZeppelin/openzeppelin-contracts@v5.7.0
+          --no-git
+      - name: 빌드
+        run: forge build --sizes
+      - name: 테스트
+        run: forge test -vv
+
+  frontend:
+    name: 프론트엔드 (타입 체크 + 빌드)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: 린트
+        run: npm run lint
+      - name: 타입 체크 + 빌드
+        run: npm run build
+
+  python:
+    name: 파이썬 서비스 (문법 검사)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: 서비스 코드 컴파일
+        run: python -m compileall -q backend gate audit ai_eval

@@ -6,7 +6,7 @@
 
 <div align="center">
 
-<img src="assets/mascot.png" alt="SafetyChain 마스코트" width="200">
+
 
 # SafetyChain
 

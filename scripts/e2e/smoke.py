@@ -354,8 +354,9 @@ def enroll_and_login(worker: str) -> tuple[FakePasskey, str]:
     code = post_json(b, "/worker/invite", {**worker_ids(worker), "supervisorName": SUPERVISOR})["code"]
     pk = FakePasskey()
     opt = post_json(b, "/worker/register/options", {**worker_ids(worker), "inviteCode": code})
-    post_json(b, "/worker/register", {**worker_ids(worker), "inviteCode": code, **pk.attestation(opt["challenge"])})
-    return pk, login(worker, pk)
+    r = post_json(b, "/worker/register", {**worker_ids(worker), "inviteCode": code, **pk.attestation(opt["challenge"])})
+    TOKENS[worker] = r["token"]  # 등록 직후 세션 (Face ID 두 번 띄우지 않음)
+    return pk, r["token"]
 
 
 def login(worker: str, pk: FakePasskey) -> str:
@@ -417,7 +418,7 @@ def run_scenarios(ws: Path, audit_grace: int) -> None:
     pk = FakePasskey()
     opt = post_json(b, "/worker/register/options", {**worker_ids("W-PASS"), "inviteCode": code})
     r = post_json(b, "/worker/register", {**worker_ids("W-PASS"), "inviteCode": code, **pk.attestation(opt["challenge"])})
-    check(r.get("registered") is True, "초대 코드 + 패스키로 등록 (터널 주소 와일드카드 허용)")
+    check(r.get("registered") is True and bool(r.get("token")), "초대 코드 + 패스키로 등록 → 바로 세션 발급 (터널 주소 와일드카드 허용)")
     ok, d = expect_error(403, post_json, b, "/worker/register/options", {**worker_ids("W-PASS"), "inviteCode": code},
                          contains="already used")
     check(ok, "초대 코드 재사용 → 거부", d)

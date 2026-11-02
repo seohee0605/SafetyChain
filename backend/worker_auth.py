@@ -262,7 +262,8 @@ def register(worker_id: str, site_id: str, invite_code: str, credential_id: str,
         )
         conn.execute("UPDATE worker_invites SET used_at = ? WHERE code_hash = ?", (now, invite["code_hash"]))
         conn.execute("DELETE FROM worker_sessions WHERE worker_id = ? AND site_id = ?", (worker_id, site_id))
-    return {"registered": True, "credentialId": credential_id}
+    # 등록의 신뢰 근거는 감독자 대면 확인 초대 코드다. 등록 직후 Face ID를 한 번 더 띄우지 않도록 바로 세션을 준다
+    return {"registered": True, "credentialId": credential_id, **_new_session(worker_id, site_id)}
 
 
 # ----------------------------------------------------------------------
@@ -309,13 +310,18 @@ def login(worker_id: str, site_id: str, credential_id: str, client_data_json: st
     # 서명 카운터: 동기화되는 패스키(아이폰 등)는 항상 0이다. 0이 아닐 때만 되감김을 막는다
     if sign_count and sign_count <= cred["sign_count"]:
         raise AuthError(403, "signature counter did not increase (cloned authenticator?)")
-    token = secrets.token_urlsafe(32)
-    expires = int(time.time()) + SESSION_TTL
     with db.get_conn() as conn:
         conn.execute(
             "UPDATE worker_credentials SET sign_count = ? WHERE worker_id = ? AND site_id = ?",
             (sign_count, worker_id, site_id),
         )
+    return _new_session(worker_id, site_id)
+
+
+def _new_session(worker_id: str, site_id: str) -> dict:
+    token = secrets.token_urlsafe(32)
+    expires = int(time.time()) + SESSION_TTL
+    with db.get_conn() as conn:
         conn.execute(
             "INSERT INTO worker_sessions (token_hash, worker_id, site_id, expires_at) VALUES (?, ?, ?, ?)",
             (_sha(token), worker_id, site_id, expires),

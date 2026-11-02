@@ -5,7 +5,6 @@ import Dashboard from './pages/Dashboard'
 import Gate from './pages/Gate'
 import SiteRecord from './pages/SiteRecord'
 import Verify from './pages/Verify'
-import Worker from './pages/Worker'
 
 const PAGES = {
   gate: { label: '게이트', component: Gate },
@@ -14,16 +13,18 @@ const PAGES = {
   dashboard: { label: '대시보드', component: Dashboard },
   audit: { label: '감리 감사', component: Audit },
   verify: { label: '검증', component: Verify },
-  worker: { label: '근로자 앱', component: Worker },
 } as const
 
 type PageKey = keyof typeof PAGES
 
-// #/gate, #/worker ... 주소로 화면을 고른다 (근로자 앱은 폰에서 #/worker 로 바로 연다)
+// #/gate, #/audit ... 주소로 화면을 고른다. 근로자 앱은 별도 입구(worker.html)로 분리했다
 function pageFromHash(): PageKey {
   const key = window.location.hash.replace(/^#\/?/, '')
   return key in PAGES ? (key as PageKey) : 'gate'
 }
+
+// 예전 근로자 앱 주소(#/worker)로 들어오면 새 근로자 앱으로 보낸다
+if (window.location.hash.replace(/^#\/?/, '') === 'worker') window.location.replace('/worker.html')
 
 function App() {
   const [page, setPageState] = useState<PageKey>(pageFromHash)
@@ -38,9 +39,6 @@ function App() {
   const setPage = (key: PageKey) => {
     window.location.hash = `/${key}`
   }
-
-  // 근로자 앱은 폰 화면이라 관리용 헤더 없이 단독으로 띄운다
-  if (page === 'worker') return <Worker />
 
   // 목업처럼 한 줄 헤더: 로고 · 메뉴 · 시계. 모든 화면이 1280px 기준 2단 배치라 넓게 쓴다
   return (

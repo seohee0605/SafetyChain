@@ -1,5 +1,7 @@
-// 폰(근로자 앱)에서 같은 와이파이로 접속할 때도 되도록 지금 연 주소의 호스트를 그대로 쓴다
-export const BACKEND_URL = `http://${window.location.hostname}:8000`
+// 폰(근로자 앱)에서 같은 와이파이로 접속할 때도 되도록 지금 연 주소의 호스트를 그대로 쓴다.
+// https(임시 터널)로 열었으면 같은 주소의 /api로 보낸다 (Vite가 백엔드로 넘김, vite.config.ts 참고)
+export const BACKEND_URL =
+  window.location.protocol === 'https:' ? `${window.location.origin}/api` : `http://${window.location.hostname}:8000`
 // 감리 감사 저장소: 시공사 백엔드와 별도 서비스. 감리 화면은 시공사 백엔드를 거치지 않고 여기와 체인만 본다
 export const AUDIT_URL = `http://${window.location.hostname}:8100`
 // 게이트 기기 서비스: 기기 키·YOLO를 가진 쪽. 키오스크는 시공사 백엔드가 아니라 여기로 검사를 보낸다

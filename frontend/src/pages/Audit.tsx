@@ -147,7 +147,7 @@ export default function Audit() {
   return (
     <div className="space-y-3.5">
       <TitleBar title="감리 감사">
-        <SitePicker siteId={siteId} workDate={new Date().toISOString().slice(0, 10)} onSite={setSiteId} onDate={() => {}} onLoad={() => load(siteId)} loadLabel="대조" />
+        <SitePicker siteId={siteId} onSite={setSiteId} onLoad={() => load(siteId)} loadLabel="전체 기간 대조" />
         {data && (
           <>
             <button onClick={() => setLive((v) => !v)} className="bg-charcoal text-white px-4 py-2.5 text-sm font-bold flex items-center gap-2">

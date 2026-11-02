@@ -11,6 +11,7 @@ import {
   ResultPanel,
   SitePicker,
   StepBar,
+  todayLocal,
   TitleBar,
   TxDetail,
   openVerify,
@@ -50,7 +51,6 @@ const SCREEN_STEP: Record<Screen, number> = { author: 0, process: 1, hazards: 2,
 const DRAFT_KEY = 'safetychain.siteRecordDraft'
 
 const emptyHazard = (): Hazard => ({ hazard: '', riskBasis: '', controlMeasure: '', completed: false })
-const today = () => new Date().toISOString().slice(0, 10)
 const nowHHMM = () => new Date().toTimeString().slice(0, 5)
 const weekday = (d: string) => '일월화수목금토'[new Date(`${d}T00:00:00`).getDay()] ?? ''
 
@@ -63,7 +63,7 @@ export default function SiteRecord() {
   const [admins, setAdmins] = useState<Admin[]>([])
   const [adminName, setAdminName] = useState('')
   const [siteId, setSiteId] = useState('')
-  const [workDate, setWorkDate] = useState(today())
+  const [workDate, setWorkDate] = useState(todayLocal())
   const [processSummary, setProcessSummary] = useState('')
   const [changeReason, setChangeReason] = useState('')
   const [hazards, setHazards] = useState<Hazard[]>([])

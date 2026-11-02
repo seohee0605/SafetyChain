@@ -508,15 +508,20 @@ def _kst_day(ts: int) -> str:
 
 
 @app.get("/dashboard/{site}")
-def dashboard(site: str):
+def dashboard(site: str, end: str | None = None):
     stats = chain.get_site_stats(site)  # 검사·불합격·override 수는 온체인 값
     checked = stats["checkIns"]
     unchecked = db.count_unchecked(site)  # 만료된 QR 수는 오프체인에만 있음
     failed = stats["failed"]
     total = checked + unchecked
 
-    # 최근 7일 추이: 검사·불합격·override는 온체인 기록(블록 시각) 기준
+    # 최근 7일 추이: 검사·불합격·override는 온체인 기록(블록 시각) 기준. end를 주면 그 날짜까지 7일
     today = datetime.now(KST).date()
+    if end:
+        try:
+            today = min(date.fromisoformat(end), today)
+        except ValueError:
+            raise HTTPException(400, "end must be YYYY-MM-DD")
     days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     daily = {
         d: {"date": d, "checked": 0, "unchecked": 0, "failed": 0, "overrides": 0, "held": 0, "late": 0}

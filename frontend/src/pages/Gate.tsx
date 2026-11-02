@@ -101,6 +101,7 @@ export default function Gate() {
   const [emergencyResult, setEmergencyResult] = useState<EmergencyResult | null>(null)
   const [emergencyError, setEmergencyError] = useState<string | null>(null)
   const [showEmergency, setShowEmergency] = useState(false)
+  const [showInvite, setShowInvite] = useState(false)
   const [signingMode, setSigningMode] = useState<'wallet' | 'server'>('wallet')
   const [siteRecord, setSiteRecord] = useState<SiteRecord | null | undefined>(undefined) // undefined: 아직 모름
   const [showTools, setShowTools] = useState(false)
@@ -490,9 +491,8 @@ export default function Gate() {
 
       {showTools && (
         <Card>
-          <WorkerInvite supervisors={supervisors} workerId={workerId} siteId={siteId} onWorker={setWorkerId} onSite={setSiteId} />
           <p className="text-xs text-ink-muted">
-            근로자는 폰에서 <a href="/worker.html" className="underline font-semibold">근로자 앱</a>을 열어 Face ID로 로그인하고 QR을 띄웁니다.
+            처음 오는 근로자의 현장 등록(초대 코드 발급)은 화면 아래 "감독자 전용"에 있어요. 근로자는 폰에서 <a href="/worker.html" className="underline font-semibold">근로자 앱</a>을 열어 Face ID로 로그인하고 QR을 띄웁니다.
             아래 "QR 발급"은 근로자 인증을 끈 경우(백엔드 WORKER_AUTH=off)에만 쓰는 예전 방식이에요. 사번·현장 ID는 예외 출입에도 쓰입니다.
           </p>
           <div className="grid sm:grid-cols-4 gap-2.5">
@@ -609,8 +609,9 @@ export default function Gate() {
                 {scanning ? 'QR 찾는 중…' : 'QR 스캔 시작'}
               </BigButton>
               <p className="text-sm text-ink-muted">
-                처음 오는 근로자는 위 <button onClick={() => setShowTools(true)} className="underline font-semibold">시연 도구</button>의
-                현장 등록에서 초대 코드를 받아 근로자 앱에 등록해요.
+                처음 오는 근로자는 감독자에게{' '}
+                <button onClick={() => setShowInvite(true)} className="underline font-semibold">현장 등록 (초대 코드)</button>을 받아 근로자 앱에
+                등록해요.
               </p>
             </div>
             <CameraBox className="lg:w-[46%]">
@@ -731,8 +732,12 @@ export default function Gate() {
       {error && <ErrorText>{error}</ErrorText>}
 
       <div className="bg-paper-dark flex flex-wrap items-center gap-2 px-5 py-3 text-sm font-bold">
+        <span>감독자 전용</span>
+        <button onClick={() => setShowInvite(true)} className="hover:underline">
+          ▸ 근로자 현장 등록 (초대 코드)
+        </button>
         <button onClick={() => setShowEmergency(true)} className="hover:underline">
-          감독자 전용 ▸ 긴급·장비 장애 예외 출입
+          ▸ 긴급·장비 장애 예외 출입
         </button>
         <span className="ml-auto text-ink-muted font-medium">검사 결과는 블록체인에 자동 기록돼요</span>
       </div>
@@ -762,6 +767,17 @@ export default function Gate() {
               className="bg-charcoal text-white border-2 border-charcoal py-3.5 font-black disabled:opacity-40"
             >
               {previewKind ? '미리보기에선 기록 안 함' : overriding ? '서명 중…' : '감독자 서명하고 통과'}
+            </button>
+          </ModalButtons>
+        </Modal>
+      )}
+
+      {showInvite && (
+        <Modal caption="감독자 전용 · 근로자 현장 등록" title="본인 확인 후 초대 코드를 발급해요" onClose={() => setShowInvite(false)}>
+          <WorkerInvite supervisors={supervisors} workerId={workerId} siteId={siteId} onWorker={setWorkerId} onSite={setSiteId} />
+          <ModalButtons>
+            <button onClick={() => setShowInvite(false)} className="border-2 border-charcoal py-3.5 font-black">
+              닫기
             </button>
           </ModalButtons>
         </Modal>
@@ -953,10 +969,12 @@ function WorkerInvite(props: {
   }
 
   return (
-    <div className="border-2 border-charcoal bg-safety-yellow/15 p-3 space-y-2.5">
-      <p className="font-bold text-charcoal">현장 등록 · 근로자 초대 코드</p>
-      <p className="text-xs text-ink-muted">신분증으로 본인을 확인한 뒤 발급하세요. 코드는 한 번만 쓸 수 있고 24시간 뒤 만료돼요.</p>
-      <div className="grid sm:grid-cols-4 gap-2.5">
+    <div className="space-y-2.5">
+      <p className="text-sm text-ink-muted leading-relaxed">
+        신분증으로 본인을 확인한 뒤 발급하세요. 근로자는 이 코드로 폰 근로자 앱에 Face ID 패스키를 등록해요. 코드는 한 번만 쓸 수 있고 24시간 뒤
+        만료돼요.
+      </p>
+      <div className="grid grid-cols-2 gap-2.5">
         <Input placeholder="사번" value={props.workerId} onChange={(e) => props.onWorker(e.target.value)} />
         <Input placeholder="현장 ID" value={props.siteId} onChange={(e) => props.onSite(e.target.value)} />
         <Select value={supervisor} onChange={(e) => setSupervisor(e.target.value)}>

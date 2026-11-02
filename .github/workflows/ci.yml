@@ -71,3 +71,26 @@ jobs:
           python-version: "3.11"
       - name: 서비스 코드 컴파일
         run: python -m compileall -q backend gate audit ai_eval
+
+  e2e:
+    name: E2E 스모크 (anvil + 서비스 3개)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: 서비스 의존성 설치 (게이트 AI는 대역을 쓰므로 torch 불필요)
+        run: pip install -r backend/requirements.txt
+      - name: 스모크 테스트
+        run: python scripts/e2e/smoke.py --keep
+      - name: 실패 시 서비스 로그
+        if: failure()
+        run: tail -n 80 /tmp/safetychain-e2e-*/logs/*.log

@@ -226,6 +226,28 @@ cd frontend && npm run dev -- --host
 폰 브라우저에서 `http://<노트북 IP>:5173/#/worker` 를 열면 근로자 앱(동의 → 출입 QR → 내 기록)이 뜹니다.
 게이트 화면은 `#/gate`, 데모 영상용 준비 사진 모드는 `?demo` 를 붙여서 엽니다 (`http://localhost:5173/?demo#/gate`).
 
+## E2E 스모크 테스트
+
+로컬 체인(anvil)에 컨트랙트를 새로 배포하고 시공사 백엔드·게이트·감리 감사 저장소를 실제로 띄워서,
+출입 기록이 게이트 → 감사 저장소 → 시공사 릴레이 → 체인으로 흐르는 전체 경로를 한 번에 검증한다. CI에서도 매번 돈다.
+
+```bash
+backend/.venv/bin/python scripts/e2e/smoke.py      # 약 30초, 실패하면 종료 코드 1
+```
+
+- **격리**: 서비스 폴더와 `contracts/`를 임시 폴더에 복사해서 돌린다. 평소 쓰는 DB·키·`.env`·빌드 산출물은 건드리지 않고, 포트도 18545/18000/18100/18200을 쓴다.
+- **AI 대역 (기본, CI)**: 복사본의 `gate/vision.py`만 `scripts/e2e/stub_vision.py`로 바꾼다 (YOLO·torch 불필요).
+- **실제 AI (`--real-vision`)**: 원본 `vision.py`와 `gate/models/*.pt`로 판정한다. 착용 사진은 통과, 미착용 사진은
+  (사람은 찾은 상태에서) 불합격·감독자 확인으로 판정하는지까지 검사한다.
+
+  ```bash
+  backend/.venv/bin/python scripts/e2e/smoke.py --real-vision \
+    --pass-image frontend/public/demo-helmet.jpg --deny-image <미착용 사진>
+  ```
+- **검증하는 것**: ABI 동기화 · 위험성평가 → 정상 통과(Granted) · 검증뷰 대조 · 불합격(Denied) → 감독자 Override · QR 재사용 차단 ·
+  시공사가 불합격 기록을 숨기면 감리 저장소가 "받을 수 있었는데 안 냄"으로 잡아냄 · 체인의 빈 번호(missingCount) · 감리 화면 집계
+- `--keep`을 붙이면 임시 폴더와 서비스 로그를 남긴다.
+
 ## 주요 기능
 
 - **근로자 앱**: 개인정보·민감정보(사진·음주 통과 여부) 별도 동의, 동의 없으면 QR 발급 안 함. 1회용 출입 QR, 내 출입 기록

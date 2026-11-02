@@ -43,7 +43,6 @@ const PREVIEWS: { kind: VerdictKind; label: string }[] = [
   { kind: 'heldHazards', label: '보류 (위험요인 미조치)' },
   { kind: 'deny', label: '보호구 차단' },
   { kind: 'alcohol', label: '음주 차단' },
-  { kind: 'review', label: '감독자 확인' },
   { kind: 'pending', label: '확정 대기' },
 ]
 

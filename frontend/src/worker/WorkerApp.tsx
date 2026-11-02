@@ -395,7 +395,9 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
     try {
       const data = await call<QrIssue>('/qr/issue', { body: profile })
       setQr(data)
-      setImage(await QRCode.toDataURL(data.nonce, { margin: 1, width: 480 }))
+      // 게이트가 QR 하나로 사번·현장·nonce를 읽는다 (서버가 nonce 발급 때 묶어 둔 사번·현장과 다시 대조)
+      const payload = JSON.stringify({ v: 1, n: data.nonce, w: profile.workerId, s: profile.siteId })
+      setImage(await QRCode.toDataURL(payload, { margin: 1, width: 480 }))
     } catch {
       setError('QR을 받지 못했어요. 잠시 후 다시 시도해 주세요.')
     }

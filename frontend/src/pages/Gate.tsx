@@ -208,6 +208,10 @@ export default function Gate() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workerId, siteId }),
     })
+    if (res.status === 401) {
+      setError('근로자 인증 모드예요. 근로자 앱(Face ID 로그인)에서 QR을 받아 주세요. (백엔드 WORKER_AUTH=off일 때만 여기서 발급)')
+      return
+    }
     if (res.status === 403) {
       setNeedsConsent(true)
       return
@@ -228,6 +232,10 @@ export default function Gate() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workerId, siteId, personal: consentPersonal, sensitive: consentSensitive }),
     })
+    if (res.status === 401) {
+      setError('근로자 인증 모드에서는 근로자가 앱에서 직접 동의해요.')
+      return
+    }
     if (!res.ok) {
       setError('동의 저장 실패')
       return
@@ -279,8 +287,11 @@ export default function Gate() {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
       const code = jsQR(imageData.data, imageData.width, imageData.height)
 
-      if (code && /^0x[0-9a-fA-F]{64}$/.test(code.data)) {
-        setScannedNonce(code.data)
+      const scanned = code ? parseEntryQr(code.data) : null
+      if (scanned) {
+        setScannedNonce(scanned.nonce)
+        if (scanned.workerId) setWorkerId(scanned.workerId)
+        if (scanned.siteId) setSiteId(scanned.siteId)
         setScanning(false)
         return
       }
@@ -479,16 +490,17 @@ export default function Gate() {
 
       {showTools && (
         <Card>
+          <WorkerInvite supervisors={supervisors} workerId={workerId} siteId={siteId} onWorker={setWorkerId} onSite={setSiteId} />
           <p className="text-xs text-ink-muted">
-            실제로는 근로자가 폰에서 <a href="#/worker" className="underline font-semibold">근로자 앱</a>을 열어 QR을 띄웁니다. 시연할 때는
-            여기서 같은 화면으로 발급합니다. 사번·현장 ID는 게이트 검사 제출과 예외 출입에도 쓰입니다.
+            근로자는 폰에서 <a href="/worker.html" className="underline font-semibold">근로자 앱</a>을 열어 Face ID로 로그인하고 QR을 띄웁니다.
+            아래 "QR 발급"은 근로자 인증을 끈 경우(백엔드 WORKER_AUTH=off)에만 쓰는 예전 방식이에요. 사번·현장 ID는 예외 출입에도 쓰입니다.
           </p>
           <div className="grid sm:grid-cols-4 gap-2.5">
             <Input placeholder="사번" value={workerId} onChange={(e) => setWorkerId(e.target.value)} />
             <Input placeholder="현장 ID" value={siteId} onChange={(e) => setSiteId(e.target.value)} />
             <Input type="date" value={workDate} onChange={(e) => setWorkDate(e.target.value)} />
             <button disabled={missingIds} onClick={issueQr} className="bg-charcoal text-white font-bold px-4 py-2.5 disabled:opacity-35">
-              QR 발급
+              QR 발급 (예전 방식)
             </button>
           </div>
 
@@ -593,15 +605,13 @@ export default function Gate() {
                 QR은 근로자 앱에서 열 수 있어요.
                 <br />한 번만 쓸 수 있고, 발급 후 5분이 지나면 다시 받아야 해요.
               </p>
-              <BigButton onClick={startScan} disabled={scanning || missingIds || (DEMO_MODE && !qr)} className="sm:w-80">
+              <BigButton onClick={startScan} disabled={scanning || (DEMO_MODE && !qr)} className="sm:w-80">
                 {scanning ? 'QR 찾는 중…' : 'QR 스캔 시작'}
               </BigButton>
-              {missingIds && (
-                <p className="text-sm text-ink-muted">
-                  시연: 위 <button onClick={() => setShowTools(true)} className="underline font-semibold">시연 도구</button>에서 사번·현장 ID를
-                  넣고 QR을 발급하세요.
-                </p>
-              )}
+              <p className="text-sm text-ink-muted">
+                처음 오는 근로자는 위 <button onClick={() => setShowTools(true)} className="underline font-semibold">시연 도구</button>의
+                현장 등록에서 초대 코드를 받아 근로자 앱에 등록해요.
+              </p>
             </div>
             <CameraBox className="lg:w-[46%]">
               {DEMO_MODE ? (
@@ -897,5 +907,82 @@ function BigButton({ className = '', ...props }: React.ButtonHTMLAttributes<HTML
       {...props}
       className={`bg-safety-yellow hover:bg-safety-yellow-dark text-charcoal text-xl font-black py-5 px-6 border-b-[5px] border-charcoal disabled:opacity-35 disabled:cursor-not-allowed ${className}`}
     />
+  )
+}
+
+// 근로자 앱 QR: {"v":1,"n":nonce,"w":사번,"s":현장} (예전 QR은 nonce만)
+function parseEntryQr(data: string): { nonce: string; workerId?: string; siteId?: string } | null {
+  const isNonce = (v: unknown): v is string => typeof v === 'string' && /^0x[0-9a-fA-F]{64}$/.test(v)
+  if (isNonce(data)) return { nonce: data }
+  try {
+    const o = JSON.parse(data)
+    if (o && isNonce(o.n)) {
+      return { nonce: o.n, workerId: typeof o.w === 'string' ? o.w : undefined, siteId: typeof o.s === 'string' ? o.s : undefined }
+    }
+  } catch {
+    // QR이 아닌 다른 내용
+  }
+  return null
+}
+
+// 현장 등록: 감독자가 근로자를 대면 확인하고 일회용 초대 코드를 발급한다 (근로자 앱 패스키 등록에 필요)
+function WorkerInvite(props: {
+  supervisors: Admin[]
+  workerId: string
+  siteId: string
+  onWorker: (v: string) => void
+  onSite: (v: string) => void
+}) {
+  const [supervisor, setSupervisor] = useState('')
+  const [invite, setInvite] = useState<{ code: string; expiresAt: number } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function issue() {
+    setError(null)
+    setInvite(null)
+    const res = await fetch(`${BACKEND_URL}/worker/invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workerId: props.workerId, siteId: props.siteId, supervisorName: supervisor }),
+    })
+    if (!res.ok) {
+      setError('초대 코드를 발급하지 못했어요')
+      return
+    }
+    setInvite(await res.json())
+  }
+
+  return (
+    <div className="border-2 border-charcoal bg-safety-yellow/15 p-3 space-y-2.5">
+      <p className="font-bold text-charcoal">현장 등록 · 근로자 초대 코드</p>
+      <p className="text-xs text-ink-muted">신분증으로 본인을 확인한 뒤 발급하세요. 코드는 한 번만 쓸 수 있고 24시간 뒤 만료돼요.</p>
+      <div className="grid sm:grid-cols-4 gap-2.5">
+        <Input placeholder="사번" value={props.workerId} onChange={(e) => props.onWorker(e.target.value)} />
+        <Input placeholder="현장 ID" value={props.siteId} onChange={(e) => props.onSite(e.target.value)} />
+        <Select value={supervisor} onChange={(e) => setSupervisor(e.target.value)}>
+          <option value="">확인한 감독자</option>
+          {props.supervisors.map((a) => (
+            <option key={a.name} value={a.name}>
+              {a.name}
+            </option>
+          ))}
+        </Select>
+        <button
+          disabled={!props.workerId || !props.siteId || !supervisor}
+          onClick={issue}
+          className="bg-charcoal text-white font-bold px-4 py-2.5 disabled:opacity-35"
+        >
+          초대 코드 발급
+        </button>
+      </div>
+      {invite && (
+        <p className="text-sm">
+          초대 코드{' '}
+          <span className="font-display text-2xl font-extrabold tracking-[0.15em] bg-white border-2 border-charcoal px-2">{invite.code}</span>
+          <span className="ml-2 text-ink-muted">만료 {new Date(invite.expiresAt * 1000).toLocaleString()}</span>
+        </p>
+      )}
+      {error && <p className="text-sm font-semibold text-hazard-red">{error}</p>}
+    </div>
   )
 }

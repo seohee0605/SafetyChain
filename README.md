@@ -1,3 +1,9 @@
+<p align="center">
+  
+<img src="blockbuster-banner.gif" width="100%" alt="BLOCKBUSTER · SafetyChain">
+</p>
+
+
 <div align="center">
 
 <img src="assets/mascot.png" alt="SafetyChain 마스코트" width="200">

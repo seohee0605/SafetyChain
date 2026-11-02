@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Card, ErrorText, Input, PageTitle, SecondaryButton, Select } from '../components/ui'
+import { hhmm, hhmmss, SitePicker, TitleBar } from '../components/kiosk'
+import { ErrorText, SecondaryButton, Select } from '../components/ui'
 import { AUDIT_URL, BACKEND_URL } from '../config'
 import { shortAddr, signTyped, type TypedData } from '../wallet'
 
-// 감리가 보는 화면. 시공사 백엔드가 아니라 감리 감사 저장소(게이트가 직접 보낸 원본)와 체인을 대조한다.
+// 감리가 보는 화면. 시공사 백엔드가 아니라 감리 감사 저장소(게이트가 직접 보낸 원본)와 체인을 대조한다. 목업 audit-mockup
 type AuditState = 'anchored' | 'pending' | 'missing' | 'replaced' | 'mismatch'
 
 type AuditRecord = {
@@ -15,6 +16,7 @@ type AuditRecord = {
   passed: boolean
   audit: AuditState
   entryStatus: string | null
+  anchoredAt: number | null
   inContractorDb: boolean | null
   // 미제출 기록을 감사 저장소가 체인에 직접 모의 실행한 결과
   chainCheck: { verdict: 'withheld' | 'rejected'; reason: string | null } | null
@@ -67,23 +69,28 @@ const ERROR_LABEL: Record<string, string> = {
 }
 type RelayMode = 'normal' | 'paused' | 'drop_failed'
 
-// 번호 띠 한 칸의 상태. 'gap'은 게이트도 체인도 모르는 번호 (게이트가 서명했지만 어디에도 전달되지 않음)
-type Cell = AuditState | 'rejected' | 'chainOnly' | 'gap'
+// 번호 띠 한 칸의 상태. 'late'는 체인에 늦게 올라와 감사용으로만 인정된 기록, 'gap'은 게이트도 체인도 모르는 번호
+type Cell = AuditState | 'rejected' | 'chainOnly' | 'late' | 'gap'
 
-const CELL_STYLE: Record<Cell, { cls: string; label: string }> = {
-  anchored: { cls: 'bg-hazard-green text-white', label: '체인 확인' },
-  pending: { cls: 'bg-safety-yellow text-charcoal', label: '체인 반영 대기' },
-  missing: { cls: 'bg-hazard-red text-white', label: '받을 수 있었는데 제출 안 됨' },
-  rejected: { cls: 'bg-hazard-red/15 text-hazard-red', label: '체인이 거부' },
-  replaced: { cls: 'bg-charcoal text-safety-yellow', label: '다른 기록으로 바꿔치기' },
-  mismatch: { cls: 'bg-charcoal text-safety-yellow', label: '체인 값과 다름' },
-  chainOnly: { cls: 'bg-white text-charcoal border-dashed', label: '체인에만 있음' },
-  gap: { cls: 'bg-paper-dark text-ink-muted', label: '어디에도 없음' },
+const CELL_STYLE: Record<Cell, { cls: string; icon: string; label: string }> = {
+  anchored: { cls: 'bg-hazard-green/70 text-white', icon: '✓', label: '체인 기록' },
+  late: { cls: 'bg-ink-muted text-white', icon: '⟲', label: '지연 기록' },
+  pending: { cls: 'bg-safety-yellow/20 text-safety-yellow-dark border-2 border-dashed border-safety-yellow-dark', icon: '…', label: '반영 대기' },
+  missing: {
+    cls: 'text-hazard-red border-2 border-hazard-red bg-[repeating-linear-gradient(135deg,#fdecea_0_8px,#fff_8px_16px)]',
+    icon: '✕',
+    label: '누락',
+  },
+  rejected: { cls: 'bg-hazard-red/15 text-hazard-red', icon: '⊘', label: '체인이 거부' },
+  replaced: { cls: 'bg-charcoal text-safety-yellow', icon: '⇄', label: '바꿔치기' },
+  mismatch: { cls: 'bg-charcoal text-safety-yellow', icon: '≠', label: '값 불일치' },
+  chainOnly: { cls: 'bg-white text-charcoal border-2 border-dashed border-charcoal', icon: '?', label: '체인에만 있음' },
+  gap: { cls: 'bg-paper-dark text-ink-muted', icon: '', label: '어디에도 없음' },
 }
 
-const PROBLEM: AuditState[] = ['missing', 'replaced', 'mismatch', 'pending']
+const cellOf = (r: AuditRecord): Cell =>
+  r.chainCheck?.verdict === 'rejected' ? 'rejected' : r.audit === 'anchored' && r.entryStatus === 'LateAuditOnly' ? 'late' : r.audit
 
-const time = (ts: number) => new Date(ts * 1000).toLocaleTimeString()
 const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`
 
 export default function Audit() {
@@ -92,7 +99,11 @@ export default function Audit() {
   const [data, setData] = useState<Summary | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(true)
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  const [now, setNow] = useState(Date.now())
   const [rejections, setRejections] = useState<Rejection[]>([])
+  const [showTools, setShowTools] = useState(false)
+  const [showAll, setShowAll] = useState(false)
 
   const load = useCallback(async (site: string) => {
     try {
@@ -100,6 +111,7 @@ export default function Audit() {
       if (!res.ok) throw new Error(`감사 저장소 응답 오류 (${res.status})`)
       setData(await res.json())
       setLoadedSite(site)
+      setUpdatedAt(Date.now())
       setError(null)
       // 거부 로그는 시공사 백엔드가 남기는 참고 자료라 실패해도 대조 화면은 그대로 보여준다
       fetch(`${BACKEND_URL}/rejections/${encodeURIComponent(site)}`)
@@ -117,258 +129,327 @@ export default function Audit() {
     const id = setInterval(() => load(loadedSite), 3000)
     return () => clearInterval(id)
   }, [loadedSite, live, load])
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
 
-  const problems = (data?.records.filter((r) => PROBLEM.includes(r.audit)) ?? []).sort((a, b) => a.deviceSeq - b.deviceSeq)
+  const c = data?.counts
+  const k = data?.contractor
+  const flagged = c ? c.withheld + c.replaced + c.mismatch + c.chainOnly + (k?.contractorOnly ?? 0) : 0
+  const missingRecs = (data?.records ?? []).filter((r) => r.audit === 'missing' && r.chainCheck?.verdict === 'withheld').sort((a, b) => a.deviceSeq - b.deviceSeq)
+  const pendingRecs = (data?.records ?? []).filter((r) => r.audit === 'pending')
+  const lateCount = (data?.records ?? []).filter((r) => cellOf(r) === 'late').length
+  // 다음 판정까지 남은 초 (가장 먼저 들어온 반영 대기 기록 기준)
+  const nextJudge = pendingRecs.length && data ? Math.max(0, Math.min(...pendingRecs.map((r) => r.receivedAt + data.graceSeconds)) - Math.floor(now / 1000)) : null
+  const rows = [...(data?.records ?? [])].sort((a, b) => b.deviceSeq - a.deviceSeq)
 
   return (
-    <div className="space-y-5">
-      <PageTitle
-        title="감리 감사"
-        subtitle="게이트가 서명 직후 감리에 직접 보낸 원본과 블록체인 기록을 대조합니다"
-      />
+    <div className="space-y-3.5">
+      <TitleBar title="감리 감사">
+        <SitePicker siteId={siteId} workDate={new Date().toISOString().slice(0, 10)} onSite={setSiteId} onDate={() => {}} onLoad={() => load(siteId)} loadLabel="대조" />
+        {data && (
+          <>
+            <button onClick={() => setLive((v) => !v)} className="bg-charcoal text-white px-4 py-2.5 text-sm font-bold flex items-center gap-2">
+              <i className={`w-2 h-2 rounded-full ${live ? 'bg-hazard-green' : 'bg-white/40'}`} />
+              {live ? '감리 저장소 수신 중' : '실시간 대조 꺼짐'}
+            </button>
+            <span className="text-sm font-bold text-ink-muted">
+              {nextJudge !== null ? `다음 판정까지 ${nextJudge}초` : updatedAt && now - updatedAt < 4000 ? '방금 갱신' : updatedAt ? `${Math.round((now - updatedAt) / 1000)}초 전 갱신` : ''}
+            </span>
+          </>
+        )}
+        <button onClick={() => setShowTools((v) => !v)} className="border-2 border-charcoal px-3 py-2 text-sm font-bold">
+          시연 도구 {showTools ? '▾' : '▸'}
+        </button>
+      </TitleBar>
 
-      <div className="flex gap-2">
-        <Input placeholder="현장 ID" value={siteId} onChange={(e) => setSiteId(e.target.value)} className="flex-1" />
-        <SecondaryButton onClick={() => load(siteId)} disabled={!siteId}>
-          대조
-        </SecondaryButton>
-      </div>
-
+      {showTools && <DemoTools onChanged={() => loadedSite && load(loadedSite)} />}
       {error && <ErrorText>{error}</ErrorText>}
+      {!data && !error && <p className="text-ink-muted py-16 text-center text-lg">현장 ID를 넣고 대조를 누르세요.</p>}
 
-      {data && (
+      {data && c && (
         <>
-          <Verdict data={data} live={live} onToggleLive={() => setLive((v) => !v)} />
-
-          <Card>
-            <div className="flex flex-wrap justify-between items-baseline gap-2">
-              <p className="font-display font-bold uppercase tracking-wide text-charcoal">게이트 기기 일련번호</p>
-              <Legend />
-            </div>
-            {data.devices.length === 0 && <p className="text-sm text-ink-muted">아직 게이트 기록이 없습니다.</p>}
-            {data.devices.map((d) => (
-              <SequenceStrip key={d.address} device={d} records={data.records} chainOnly={data.chainOnly} />
-            ))}
-          </Card>
-
-          {problems.length > 0 && (
-            <Card>
-              <p className="font-display font-bold uppercase tracking-wide text-charcoal">확인이 필요한 기록</p>
-              <div className="divide-y-2 divide-charcoal/10">
-                {problems.map((r) => (
-                  <div key={r.nonce} className="flex items-center justify-between gap-3 py-2.5 text-sm">
-                    <span className="font-display font-extrabold text-lg w-12 text-charcoal">#{r.deviceSeq}</span>
-                    <span className="flex-1 text-ink">
-                      {r.passed ? '검사 통과' : '검사 불합격'}
-                      <span className="text-ink-muted"> · 게이트 서명 {time(r.signedAt)}</span>
-                      {r.chainCheck?.verdict === 'withheld' && (
-                        <span className="block text-xs text-hazard-red font-semibold">
-                          체인에 직접 모의 실행: 받을 수 있는 기록인데 제출되지 않음
-                        </span>
-                      )}
-                      {r.chainCheck?.verdict === 'rejected' && (
-                        <span className="block text-xs text-ink-muted">
-                          체인에 직접 모의 실행: 거부됨 · {ERROR_LABEL[r.chainCheck.reason ?? ''] ?? r.chainCheck.reason}
-                        </span>
-                      )}
-                    </span>
-                    {r.inContractorDb !== null && (
-                      <span className="shrink-0 text-xs text-ink-muted">시공사 DB {r.inContractorDb ? '있음' : '없음'}</span>
-                    )}
-                    {(() => {
-                      const cell: Cell = r.chainCheck?.verdict === 'rejected' ? 'rejected' : r.audit
-                      return (
-                        <span className={`shrink-0 px-2 py-1 border-2 border-charcoal text-xs font-semibold ${CELL_STYLE[cell].cls}`}>
-                          {CELL_STYLE[cell].label}
-                        </span>
-                      )
-                    })()}
-                  </div>
-                ))}
+          {flagged > 0 ? (
+            <>
+              <div className="bg-hazard-red text-white px-6 py-5 flex items-center gap-5">
+                <span className="w-16 h-16 shrink-0 rounded-full bg-white grid place-items-center text-4xl font-black text-hazard-red">✕</span>
+                <div>
+                  <p className="text-3xl font-black">
+                    {missingRecs.length > 0 ? `기록 ${missingRecs.length}건이 체인에 올라오지 않았어요` : `누락·변조 의심 ${flagged}건`}
+                  </p>
+                  <p className="font-bold">
+                    {missingRecs.length > 0
+                      ? `게이트는 보냈고 감리는 받았는데 시공사가 올리지 않았어요 · ${missingRecs.map((r) => `#${r.deviceSeq}`).join(', ')}`
+                      : '아래 칸에서 어떤 종류인지 확인하세요'}
+                  </p>
+                </div>
               </div>
-              {data.conflicts.length > 0 && (
-                <p className="text-xs text-ink-muted">
-                  같은 일련번호로 다른 기록을 감사 저장소에 덮어쓰려던 시도 {data.conflicts.length}건 (원본은 그대로 보존)
-                </p>
-              )}
-            </Card>
+              <div className="grid grid-cols-3 lg:grid-cols-6 gap-2">
+                <Stat n={c.withheld} label="받을 수 있었는데 안 냄" />
+                <Stat n={c.chainRejected} label="체인이 거부 (사유 확인)" quiet />
+                <Stat n={c.replaced} label="바꿔치기" />
+                <Stat n={c.mismatch} label="값 불일치" />
+                <Stat n={c.chainOnly} label="체인에만 있음" />
+                <Stat n={k ? k.hidden : 0} label={k ? '시공사 DB에서도 사라짐' : '시공사 DB 연결 안 됨'} />
+              </div>
+            </>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <Kpi title="감리가 받은 원본" badge="게이트 직송" n={c.auditTotal} detail="게이트가 서명 직후 감리 저장소로 바로 보냄" />
+              <Kpi
+                title="체인에 올라간 기록"
+                badge="시공사 릴레이"
+                n={c.anchored}
+                tone="text-hazard-green"
+                border="border-hazard-green"
+                detail={lateCount ? `정상 ${c.anchored - lateCount} · 지연 기록 ${lateCount}` : '시공사 서버가 가스비를 내고 제출'}
+              />
+              <Kpi
+                title="반영 대기"
+                badge={`유예 ${data.graceSeconds}초`}
+                n={c.pending}
+                tone="text-safety-yellow-dark"
+                border="border-safety-yellow-dark"
+                detail={`${data.graceSeconds}초가 지나도 체인에 없으면 미제출로 판정`}
+              />
+              <Kpi
+                title="누락"
+                badge="받을 수 있었는데 안 냄"
+                n={c.withheld}
+                tone="text-hazard-red"
+                border="border-hazard-red"
+                detail={lateCount ? `다시 올라온 ${lateCount}건은 지연 기록으로 영구 표시` : '체인 모의 실행으로 받아줄 기록인지 확인'}
+              />
+            </div>
           )}
 
-          <PendingSignatures site={loadedSite ?? siteId} onDone={() => loadedSite && load(loadedSite)} />
+          {data.devices.map((d) => (
+            <SequenceStrip key={d.address} device={d} records={data.records} chainOnly={data.chainOnly} pendingIn={nextJudge} />
+          ))}
+          {data.devices.length === 0 && <p className="bg-white p-4 text-ink-muted">아직 게이트 기록이 없습니다.</p>}
 
-          <Card>
-            <p className="font-display font-bold uppercase tracking-wide text-charcoal">긴급·장비 장애 예외 출입</p>
-            {data.emergencies.length === 0 ? (
-              <p className="text-sm text-ink-muted">예외 출입 기록이 없습니다.</p>
-            ) : (
-              <div className="divide-y-2 divide-charcoal/10">
-                {data.emergencies.map((e) => (
-                  <div key={e.nonce} className="flex justify-between gap-3 py-2 text-sm">
-                    <span className="text-ink">{e.reason}</span>
-                    <span className="shrink-0 text-ink-muted text-xs">
-                      {new Date(e.anchoredAt * 1000).toLocaleString()} · 감독자 {short(e.supervisor)} + {short(e.approver)}
-                    </span>
-                  </div>
-                ))}
+          <div className="flex flex-col lg:flex-row gap-4">
+            <div className="flex-1 bg-white border-t-[5px] border-charcoal flex flex-col">
+              <div className="flex items-baseline px-5 py-3">
+                <p className="text-xl font-black">3자 대조</p>
+                <span className="ml-auto text-xs font-bold text-ink-muted">기준: 감리 원본 · 시공사 DB · 블록체인</span>
               </div>
-            )}
-          </Card>
-
-          <Card>
-            <p className="font-display font-bold uppercase tracking-wide text-charcoal">서명자 해제 이력</p>
-            {data.revocations.length === 0 ? (
-              <p className="text-sm text-ink-muted">해제된 서명자가 없습니다.</p>
-            ) : (
-              <div className="divide-y-2 divide-charcoal/10">
-                {data.revocations.map((r, i) => (
-                  <div key={i} className="py-2.5 text-sm space-y-0.5">
-                    <p className="text-ink font-semibold">
-                      {r.role === 'device' ? '게이트 기기' : '감독자'} {short(r.account)} 해제 · {r.reason}
-                    </p>
-                    <p className="text-ink-muted text-xs">
-                      {new Date(r.revokedAt * 1000).toLocaleString()} · 해제 직전 마지막 번호 #{r.lastSeq} · 그 시점 체인 누락 {r.missingAtRevoke}건
-                    </p>
-                  </div>
-                ))}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-charcoal text-white text-left">
+                    <tr>
+                      {['번호', '검사 시각', '감리 원본', '블록체인', '시공사 DB', '판정'].map((h) => (
+                        <th key={h} className="px-4 py-2 font-bold">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(showAll ? rows : rows.slice(0, 8)).map((r) => (
+                      <AuditRow key={r.nonce} r={r} grace={data.graceSeconds} now={now} />
+                    ))}
+                    {rows.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-6 text-ink-muted">
+                          감리 저장소에 받은 원본이 없어요.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
-            )}
-          </Card>
-
-          <Card>
-            <div className="flex flex-wrap justify-between items-baseline gap-2">
-              <p className="font-display font-bold uppercase tracking-wide text-charcoal">체인이 거부한 제출</p>
-              <span className="text-xs text-ink-muted">시공사 릴레이 로그</span>
+              <div className="mt-auto px-5 py-3 flex flex-wrap gap-2.5 justify-end">
+                {data.conflicts.length > 0 && (
+                  <span className="mr-auto text-xs text-ink-muted self-center">같은 일련번호로 덮어쓰려던 시도 {data.conflicts.length}건 (원본은 그대로 보존)</span>
+                )}
+                {rows.length > 8 && (
+                  <button onClick={() => setShowAll((v) => !v)} className="border-2 border-charcoal px-4 py-2.5 font-bold">
+                    {showAll ? '최근 8건만' : `전체 ${rows.length}건 보기`}
+                  </button>
+                )}
+                {missingRecs.length > 0 && (
+                  <a href="#/caseReview" className="bg-hazard-red text-white px-4 py-2.5 font-bold border-b-4 border-hazard-red-dark">
+                    케이스 검토에서 반려하기 ▸
+                  </a>
+                )}
+                {missingRecs.length === 0 && lateCount > 0 && (
+                  <a href="#/caseReview" className="bg-safety-yellow px-4 py-2.5 font-bold border-b-4 border-charcoal">
+                    케이스 검토에서 확인하기 ▸
+                  </a>
+                )}
+              </div>
             </div>
-            {rejections.length === 0 ? (
-              <p className="text-sm text-ink-muted">거부된 제출이 없습니다.</p>
-            ) : (
-              <div className="divide-y-2 divide-charcoal/10">
-                {rejections.map((r, i) => (
-                  <div key={i} className="flex justify-between gap-3 py-2 text-sm">
-                    <span className="text-ink">
-                      {KIND_LABEL[r.kind] ?? r.kind} · {ERROR_LABEL[r.error] ?? r.error}
-                    </span>
-                    <span className="shrink-0 text-ink-muted text-xs">{new Date(r.at * 1000).toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            <p className="text-xs text-ink-muted">
-              시공사 릴레이가 스스로 남긴 기록입니다. 미제출 기록의 실제 거부 여부·사유는 감사 저장소가 체인에 직접 모의 실행해 위 목록에 표시하므로, 이 로그와 다르면 위 결과가 기준입니다.
-            </p>
-          </Card>
 
-          <DemoTools onChanged={() => loadedSite && load(loadedSite)} />
+            <div className="lg:w-[340px] flex flex-col gap-3">
+              {missingRecs.length > 0 && (
+                <div className="bg-white border-t-[5px] border-hazard-red p-5 text-sm">
+                  <p className="font-black text-base mb-1">왜 '제출 보류'인가요?</p>
+                  감리 저장소가 이 {missingRecs.length}건을 체인에 모의 실행해 봤더니 정상으로 받아들여졌어요. 즉 체인이 거부한 게 아니라 시공사가 내지 않은 기록이에요.
+                </div>
+              )}
+              <PendingSignatures site={loadedSite ?? siteId} onDone={() => loadedSite && load(loadedSite)} />
+              <div className="bg-charcoal text-white p-5 text-sm space-y-1.5">
+                <p className="font-black text-base">기기 해제 이력</p>
+                {data.revocations.length === 0 && <p className="text-white/70">해제된 서명자가 없어요.</p>}
+                {data.revocations.map((r, i) => (
+                  <p key={i} className="text-white/80">
+                    {new Date(r.revokedAt * 1000).toLocaleDateString('ko-KR')} {r.role === 'device' ? '게이트 기기' : '감독자'} {short(r.account)} 해제 · {r.reason}
+                    <br />
+                    해제 직전 마지막 번호 #{r.lastSeq} · 그때 누락 {r.missingAtRevoke}건
+                  </p>
+                ))}
+                <p className="text-white/60 text-xs">새 기기는 감리 승인 후에만 등록돼 번호를 다시 시작할 수 없어요</p>
+              </div>
+              {data.emergencies.length > 0 && (
+                <div className="bg-white p-5 text-sm">
+                  <p className="font-black text-base mb-1">예외 출입 · {data.emergencies.length}건</p>
+                  {data.emergencies.map((e) => (
+                    <p key={e.nonce} className="py-1 border-b border-charcoal/10 last:border-0">
+                      {e.reason} <span className="text-ink-muted text-xs">· {hhmmss(e.anchoredAt)} · {short(e.supervisor)} + {short(e.approver)}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              {rejections.length > 0 && (
+                <details className="bg-white p-4 text-sm">
+                  <summary className="font-bold cursor-pointer">체인이 거부한 제출 · {rejections.length}건 (시공사 릴레이 로그)</summary>
+                  {rejections.map((r, i) => (
+                    <p key={i} className="py-1">
+                      {KIND_LABEL[r.kind] ?? r.kind} · {ERROR_LABEL[r.error] ?? r.error} <span className="text-xs text-ink-muted">{new Date(r.at * 1000).toLocaleString()}</span>
+                    </p>
+                  ))}
+                  <p className="text-xs text-ink-muted mt-1">미제출 기록의 실제 거부 여부는 감사 저장소가 체인에 직접 모의 실행한 결과가 기준이에요.</p>
+                </details>
+              )}
+            </div>
+          </div>
         </>
       )}
     </div>
   )
 }
 
-function Verdict({ data, live, onToggleLive }: { data: Summary; live: boolean; onToggleLive: () => void }) {
-  const c = data.counts
-  // 체인이 거부한 기록은 정상적인 거부라 누락·변조 의심에서 뺀다 (사유는 목록에 표시)
-  const flagged = c.withheld + c.replaced + c.mismatch
-  const k = data.contractor
-  const ok = flagged === 0 && c.chainOnly === 0 && (!k || k.contractorOnly === 0)
+function Stat({ n, label, quiet }: { n: number; label: string; quiet?: boolean }) {
+  const hot = n > 0 && !quiet
   return (
-    <div className={`border-2 border-charcoal p-5 ${ok ? 'bg-white' : 'bg-hazard-red text-white'}`}>
-      <div className="flex justify-between items-start gap-3">
-        <div>
-          <p className="text-4xl font-display font-extrabold leading-none">
-            {ok ? '누락 없음' : `누락·변조 의심 ${flagged + c.chainOnly}건`}
-          </p>
-          <p className={`text-sm mt-2 ${ok ? 'text-ink-muted' : 'text-white/85'}`}>
-            게이트 원본 {c.auditTotal}건 중 체인 확인 {c.anchored}건
-            {c.pending > 0 && ` · 반영 대기 ${c.pending}건 (${data.graceSeconds}초 지나면 미제출로 판정)`}
-          </p>
-          <p className={`text-xs mt-1 ${ok ? 'text-ink-muted' : 'text-white/85'}`}>
-            {k
-              ? `3자 대조: 게이트 원본 ${c.auditTotal} · 시공사 DB ${k.total} · 블록체인 ${c.chainTotal}`
-              : '시공사 DB에 연결할 수 없어 게이트 원본과 블록체인만 대조했습니다'}
-          </p>
-        </div>
-        <button
-          onClick={onToggleLive}
-          className={`shrink-0 text-xs font-semibold border-2 px-2 py-1 ${ok ? 'border-charcoal text-charcoal' : 'border-white text-white'}`}
-        >
-          {live ? '실시간 대조 중' : '실시간 대조 꺼짐'}
-        </button>
-      </div>
-      {!ok && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4 text-sm">
-          <Stat n={c.withheld} label="받을 수 있었는데 안 냄" />
-          <Stat n={c.replaced} label="바꿔치기" />
-          <Stat n={c.mismatch} label="값 불일치" />
-          <Stat n={c.chainRejected} label="체인이 거부 (사유 확인)" />
-          <Stat n={c.chainOnly} label="체인에만 있음" />
-          {k && <Stat n={k.hidden} label="시공사 DB에서도 사라짐" />}
-          {k && <Stat n={k.contractorOnly} label="시공사 DB에만 있음" />}
-        </div>
-      )}
+    <div className={`border-2 px-3 py-2.5 ${hot ? 'border-hazard-red bg-hazard-red/10' : 'border-charcoal/10 bg-white'}`}>
+      <p className={`text-2xl font-black ${hot ? 'text-hazard-red' : ''}`}>{n}</p>
+      <p className="text-xs font-bold text-ink-muted">{label}</p>
     </div>
   )
 }
 
-function Stat({ n, label }: { n: number; label: string }) {
+function Kpi({ title, badge, n, detail, tone = '', border = 'border-charcoal' }: { title: string; badge: string; n: number; detail: string; tone?: string; border?: string }) {
   return (
-    <div className="border-2 border-white/60 px-3 py-2">
-      <p className="text-2xl font-display font-extrabold leading-none">{n}</p>
-      <p className="text-xs text-white/85 mt-1">{label}</p>
+    <div className={`bg-white border-t-[5px] ${border} p-4`}>
+      <p className="font-bold flex items-center gap-2">
+        {title}
+        <span className="ml-auto bg-charcoal text-white text-[11px] px-1.5 py-0.5">{badge}</span>
+      </p>
+      <p className={`text-5xl font-black ${tone}`}>{n}</p>
+      <p className="text-xs text-ink-muted">{detail}</p>
     </div>
   )
 }
 
-function Legend() {
-  const keys: Cell[] = ['anchored', 'pending', 'missing', 'rejected', 'replaced', 'chainOnly', 'gap']
+function AuditRow({ r, grace, now }: { r: AuditRecord; grace: number; now: number }) {
+  const cell = cellOf(r)
+  const yes = <span className="text-hazard-green font-bold">✓ 있음</span>
+  const no = <span className="text-hazard-red font-bold">✕ 없음</span>
+  const left = Math.max(0, r.receivedAt + grace - Math.floor(now / 1000))
+  const chainCol =
+    cell === 'anchored' ? yes : cell === 'late' ? <span className="text-ink-muted font-bold">⟲ {r.anchoredAt ? hhmm(r.anchoredAt) : ''} 반영</span> : cell === 'pending' ? <span className="text-safety-yellow-dark font-bold">… 대기</span> : no
+  const verdict: Record<Cell, React.ReactNode> = {
+    anchored: <span className="text-hazard-green font-bold">✓ {r.inContractorDb === null ? '2곳' : '3곳'} 일치</span>,
+    late: (
+      <>
+        <span className="text-ink-muted font-bold">지연 기록</span>
+        <small className="block text-ink-muted">감사용으로만 인정 · 원래 시각 그대로</small>
+      </>
+    ),
+    pending: <span className="text-safety-yellow-dark font-bold">… 반영 대기 {left}초</span>,
+    missing: (
+      <>
+        <span className="text-hazard-red font-bold">✕ 누락 · 제출 보류</span>
+        <small className="block text-ink-muted">체인 모의 실행: 받아줄 기록</small>
+      </>
+    ),
+    rejected: (
+      <>
+        <span className="text-hazard-red font-bold">체인이 거부</span>
+        <small className="block text-ink-muted">{ERROR_LABEL[r.chainCheck?.reason ?? ''] ?? r.chainCheck?.reason}</small>
+      </>
+    ),
+    replaced: <span className="text-hazard-red font-bold">⇄ 다른 기록으로 바꿔치기</span>,
+    mismatch: <span className="text-hazard-red font-bold">≠ 체인 값과 다름</span>,
+    chainOnly: <span className="font-bold">체인에만 있음</span>,
+    gap: null,
+  }
+  const bg = cell === 'missing' || cell === 'rejected' || cell === 'replaced' || cell === 'mismatch' ? 'bg-hazard-red/5' : cell === 'pending' ? 'bg-safety-yellow/10' : cell === 'late' ? 'bg-paper-dark/50' : ''
   return (
-    <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
-      {keys.map((k) => (
-        <span key={k} className="flex items-center gap-1">
-          <span className={`w-3 h-3 inline-block border border-charcoal ${CELL_STYLE[k].cls}`} />
-          {CELL_STYLE[k].label}
-        </span>
-      ))}
-    </div>
+    <tr className={`border-b border-charcoal/10 ${bg}`}>
+      <td className="px-4 py-2.5 font-black">#{r.deviceSeq}</td>
+      <td className="px-4 py-2.5">{hhmmss(r.signedAt)}</td>
+      <td className="px-4 py-2.5">{yes}</td>
+      <td className="px-4 py-2.5">{chainCol}</td>
+      <td className="px-4 py-2.5">{r.inContractorDb === null ? <span className="text-ink-muted">연결 안 됨</span> : r.inContractorDb ? yes : no}</td>
+      <td className="px-4 py-2.5">
+        {verdict[cell]}
+        {r.entryStatus && (r.entryStatus === 'HeldNoAssessment' || r.entryStatus === 'HeldHazardsOpen') && <small className="block text-ink-muted">보류 · {r.entryStatus === 'HeldNoAssessment' ? '평가 전' : '위험요인 미조치'}</small>}
+      </td>
+    </tr>
   )
 }
 
 // 기기가 매긴 번호를 한 줄로 늘어놓는다. 빠진 칸이 곧 시공사가 체인에 내지 않은 기록이다
-function SequenceStrip({ device, records, chainOnly }: { device: DeviceRow; records: AuditRecord[]; chainOnly: ChainOnly[] }) {
+function SequenceStrip({ device, records, chainOnly, pendingIn }: { device: DeviceRow; records: AuditRecord[]; chainOnly: ChainOnly[]; pendingIn: number | null }) {
   const max = Math.max(device.chainHighestSeq, device.auditHighestSeq)
   const bySeq = new Map<number, Cell>()
   chainOnly.filter((c) => c.device === device.address).forEach((c) => bySeq.set(c.deviceSeq, 'chainOnly'))
-  records
-    .filter((r) => r.device === device.address)
-    .forEach((r) => bySeq.set(r.deviceSeq, r.chainCheck?.verdict === 'rejected' ? 'rejected' : r.audit))
-  const cells = Array.from({ length: max }, (_, i) => i + 1)
+  records.filter((r) => r.device === device.address).forEach((r) => bySeq.set(r.deviceSeq, cellOf(r)))
+  // 최근 24칸만 (많으면 앞쪽은 생략). 감사 저장소·체인이 아는 가장 작은 번호보다 앞은 그리지 않는다
+  const known = [...bySeq.keys()]
+  const from = Math.max(known.length ? Math.min(...known) : 1, max - 23)
+  const cells = Array.from({ length: max - from + 1 }, (_, i) => from + i)
+  const pend = [...bySeq.values()].filter((v) => v === 'pending').length
+  const late = [...bySeq.values()].filter((v) => v === 'late').length
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap justify-between gap-2 text-sm">
-        <span className="font-semibold text-ink">
-          기기 {short(device.address)}{' '}
-          <span className={device.active ? 'text-hazard-green' : 'text-hazard-red'}>{device.active ? '등록됨' : '해제됨'}</span>
+    <div className="bg-white border-t-[5px] border-charcoal p-5 space-y-3">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <p className="text-lg font-black">게이트 일련번호 띠</p>
+        <span className="text-xs text-ink-muted">
+          기기 {short(device.address)} · <span className={device.active ? 'text-hazard-green' : 'text-hazard-red'}>{device.active ? '감리 승인됨' : '해제됨'}</span> · 번호는 게이트가 직접 매김 · 체인이 아는 빈 번호 {device.chainMissing}개
         </span>
-        <span className="text-ink-muted">
-          체인이 아는 빈 번호 <b className="text-charcoal">{device.chainMissing}</b>개 · 감사 저장소 원본 {device.auditCount}건
-        </span>
+        <div className="ml-auto flex flex-wrap gap-3 text-xs font-bold">
+          {(['anchored', 'pending', 'missing', 'late'] as Cell[]).map((k) => (
+            <span key={k} className="flex items-center gap-1">
+              <i className={`w-3 h-3 ${CELL_STYLE[k].cls}`} />
+              {CELL_STYLE[k].label}
+            </span>
+          ))}
+        </div>
       </div>
-      <div className="flex flex-wrap gap-1" role="list" aria-label="일련번호별 상태">
+      <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${Math.min(12, cells.length)}, minmax(0, 1fr))` }}>
         {cells.map((seq) => {
           const cell = bySeq.get(seq) ?? 'gap'
           return (
-            <span
-              key={seq}
-              role="listitem"
-              title={`#${seq} ${CELL_STYLE[cell].label}`}
-              className={`w-9 h-9 flex items-center justify-center border-2 border-charcoal text-xs font-display font-bold ${CELL_STYLE[cell].cls}`}
-            >
-              {seq}
+            <span key={seq} title={`#${seq} ${CELL_STYLE[cell].label}`} className={`h-12 flex flex-col items-center justify-center text-xs font-bold ${CELL_STYLE[cell].cls}`}>
+              <b className="text-sm leading-none">{CELL_STYLE[cell].icon}</b>#{seq}
             </span>
           )
         })}
       </div>
+      {pend > 0 && (
+        <p className="bg-safety-yellow/20 p-3 text-sm font-bold">
+          ! 최근 {pend}건이 감리에는 도착했지만 아직 체인에 올라오지 않았어요{pendingIn !== null ? ` · ${pendingIn}초 뒤 미제출로 판정` : ''}
+        </p>
+      )}
+      {late > 0 && pend === 0 && (
+        <p className="bg-paper-dark p-3 text-sm font-bold">⟲ 늦게 올라온 {late}건은 검사 시각이 원래대로 남고, 출입 근거가 아닌 감사용 지연 기록으로만 인정돼요.</p>
+      )}
     </div>
   )
 }
@@ -426,7 +507,7 @@ function DemoTools({ onChanged }: { onChanged: () => void }) {
     onChanged()
   }
 
-  if (!enabled) return null
+  if (!enabled) return <p className="bg-white p-4 text-sm text-ink-muted">시연 도구는 백엔드를 DEMO_CONTROLS=1로 켰을 때만 동작해요.</p>
 
   const modes: { key: RelayMode; label: string }[] = [
     { key: 'normal', label: '정상 제출' },
@@ -435,7 +516,7 @@ function DemoTools({ onChanged }: { onChanged: () => void }) {
   ]
 
   return (
-    <details className="border-2 border-dashed border-charcoal/50 p-4 text-sm">
+    <details open className="border-2 border-dashed border-charcoal/50 bg-white p-4 text-sm">
       <summary className="cursor-pointer font-semibold select-none text-ink">시연 도구: 시공사 쪽 동작 재현</summary>
       <div className="mt-3 space-y-4">
         <div className="space-y-1.5">
@@ -536,15 +617,19 @@ function PendingSignatures({ site, onDone }: { site: string; onDone: () => void 
     }
   }
 
-  if (proposals.length === 0 && emergencies.length === 0 && !message) return null
+  if (proposals.length === 0 && emergencies.length === 0 && !message)
+    return (
+      <div className="bg-white border-t-[5px] border-safety-yellow-dark p-5">
+        <p className="text-lg font-black">내 지갑 서명 대기 · 0건</p>
+        <p className="text-sm text-ink-muted">기기 등록 승인이나 예외 출입 공동 서명 요청이 오면 여기에 떠요.</p>
+      </div>
+    )
 
   return (
-    <Card>
-      <div className="flex flex-wrap justify-between items-baseline gap-2">
-        <p className="font-display font-bold uppercase tracking-wide text-charcoal">지갑 서명 대기</p>
-        <span className="text-xs text-ink-muted">감리 또는 발주처 지갑으로 서명 · 가스비는 시공사 부담</span>
-      </div>
-      <div className="divide-y-2 divide-charcoal/10">
+    <div className="bg-white border-t-[5px] border-safety-yellow-dark p-5 space-y-1">
+      <p className="text-lg font-black">내 지갑 서명 대기 · {proposals.length + emergencies.length}건</p>
+      <p className="text-xs text-ink-muted">감리 또는 발주처 지갑으로 서명 · 가스비는 시공사 부담</p>
+      <div className="divide-y divide-charcoal/10">
         {proposals.map((p) => (
           <div key={`p${p.proposalId}`} className="flex flex-wrap items-center justify-between gap-3 py-2.5 text-sm">
             <span className="text-ink">
@@ -552,6 +637,7 @@ function PendingSignatures({ site, onDone }: { site: string; onDone: () => void 
               <span className="block text-xs text-ink-muted">시공사가 제안했고, 감리·발주처가 승인해야 서명 권한이 생깁니다</span>
             </span>
             <SecondaryButton
+              className="!px-3 !py-1.5 !text-sm !bg-safety-yellow-dark !text-charcoal !border-0"
               disabled={busy !== null}
               onClick={() =>
                 sign(`p${p.proposalId}`, p.typedData, '/signers/approve', (signature) => ({ proposalId: p.proposalId, signature }), '등록을 승인했습니다')
@@ -570,6 +656,7 @@ function PendingSignatures({ site, onDone }: { site: string; onDone: () => void 
               </span>
             </span>
             <SecondaryButton
+              className="!px-3 !py-1.5 !text-sm !bg-safety-yellow-dark !text-charcoal !border-0"
               disabled={busy !== null}
               onClick={() =>
                 sign(e.nonce, e.typedData, '/gate/emergency/cosign', (signature) => ({ nonce: e.nonce, signature }), '예외 출입을 공동 서명했습니다')
@@ -581,6 +668,6 @@ function PendingSignatures({ site, onDone }: { site: string; onDone: () => void 
         ))}
       </div>
       {message && <p className="text-xs font-semibold text-ink">{message}</p>}
-    </Card>
+    </div>
   )
 }

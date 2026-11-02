@@ -1,9 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700;900&display=swap');
 @import "tailwindcss";
 
 @theme {
   --font-display: "Barlow Condensed", sans-serif;
-  --font-sans: "Inter", sans-serif;
+  --font-sans: "Inter", "Noto Sans KR", sans-serif; /* 한글은 목업과 같은 Noto Sans KR */
 
   --color-charcoal: #1c1b1b;
   --color-charcoal-light: #322f2d;
@@ -16,6 +16,8 @@
   --color-ink-muted: #6b6259;
   --color-hazard-green: #1f6b3d;
   --color-hazard-red: #b3241c;
+  --color-hazard-red-dark: #8f1d16; /* 게이트: 음주 차단 */
+  --color-review-blue: #2f5a8a; /* 게이트: 감독자 확인 대기 */
 }
 
 body {
@@ -33,3 +35,4 @@ body {
     var(--color-charcoal) 20px
   );
 }
+

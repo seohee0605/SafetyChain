@@ -39,14 +39,15 @@ function saveProfile(p: Profile | null) {
   }
 }
 
+// 게이트 판정 화면(목업 gate-mockup)과 같은 말·같은 색
 const RESULT_LABEL = {
-  pass: { text: '출입 허용', cls: 'bg-hazard-green text-white' },
-  override: { text: '감독자 확인 후 허용', cls: 'bg-safety-yellow text-charcoal' },
-  fail: { text: '출입 불가', cls: 'bg-hazard-red text-white' },
-  held: { text: '위험성평가 전 보류', cls: 'bg-safety-orange text-white' },
-  hazards: { text: '위험요인 미조치 보류', cls: 'bg-safety-orange text-white' },
-  late: { text: '지연 도착 (감사용)', cls: 'bg-ink-muted text-white' },
-  suspect: { text: '기록 시각 의심', cls: 'bg-ink-muted text-white' },
+  pass: { text: '들어가세요', sub: '오늘도 안전하게!', short: '통과', cls: 'bg-hazard-green text-white', fg: 'text-hazard-green' },
+  override: { text: '감독자 확인 후 통과', sub: 'AI 판정은 그대로 남고 수동 처리 기록이 추가됐어요', short: '수동 처리 통과', cls: 'bg-safety-yellow text-charcoal', fg: 'text-charcoal' },
+  fail: { text: '들어갈 수 없어요', sub: '보호구나 음주 측정을 다시 확인해 주세요', short: '차단', cls: 'bg-hazard-red text-white', fg: 'text-hazard-red' },
+  held: { text: '잠시 기다려 주세요', sub: '오늘 위험성평가가 아직 등록되지 않았어요', short: '보류 · 평가 전', cls: 'bg-safety-orange text-white', fg: 'text-safety-orange' },
+  hazards: { text: '잠시 기다려 주세요', sub: '위험요인 조치가 아직 끝나지 않았어요', short: '보류 · 미조치', cls: 'bg-safety-orange text-white', fg: 'text-safety-orange' },
+  late: { text: '지연 도착 기록', sub: '출입 근거로 쓰지 않고 감사용으로 남았어요', short: '지연 기록', cls: 'bg-ink-muted text-white', fg: 'text-ink-muted' },
+  suspect: { text: '기록 시각 의심', sub: '게이트 기기 시계를 확인해야 해요', short: '시각 의심', cls: 'bg-ink-muted text-white', fg: 'text-ink-muted' },
 }
 
 const RESULT_ICON = { pass: '✓', override: '!', fail: '✕', held: '‖', hazards: '‖', late: '⧗', suspect: '⚠' }
@@ -145,7 +146,7 @@ function Setup({ onDone }: { onDone: (p: Profile) => void }) {
     'w-full border-2 border-charcoal/70 px-4 py-3.5 text-lg bg-white outline-none focus:border-charcoal focus:ring-2 focus:ring-safety-yellow'
   return (
     <div className="space-y-4">
-      <h1 className="font-display text-3xl font-bold uppercase text-charcoal">시작하기</h1>
+      <h1 className="text-3xl font-black text-charcoal">시작하기</h1>
       <p className="text-sm text-ink-muted">현장에서 받은 사번과 현장 ID를 입력해 주세요.</p>
       <input className={field} placeholder="사번" value={workerId} onChange={(e) => setWorkerId(e.target.value.trim())} />
       <input className={field} placeholder="현장 ID" value={siteId} onChange={(e) => setSiteId(e.target.value.trim())} />
@@ -174,7 +175,7 @@ function Consent({ profile, onAgreed }: { profile: Profile; onAgreed: () => void
 
   return (
     <div className="space-y-4">
-      <h1 className="font-display text-3xl font-bold uppercase text-charcoal">정보 수집 동의</h1>
+      <h1 className="text-3xl font-black text-charcoal">정보 수집 동의</h1>
       <p className="text-sm text-ink-muted">자동 출입 게이트를 쓰려면 아래 두 가지 동의가 필요해요.</p>
 
       <ConsentBox
@@ -292,9 +293,10 @@ function EntryQr({ profile }: { profile: Profile }) {
     const label = RESULT_LABEL[used.result]
     return (
       <div className="space-y-5 text-center">
-        <div className={`py-10 border-2 border-charcoal ${label.cls}`}>
-          <p className="text-6xl font-display font-extrabold">{RESULT_ICON[used.result]}</p>
-          <p className="text-3xl font-display font-extrabold uppercase mt-2">{label.text}</p>
+        <div className={`py-10 px-4 space-y-3 ${label.cls}`}>
+          <p className={`mx-auto w-20 h-20 rounded-full bg-white grid place-items-center text-5xl font-black ${label.fg}`}>{RESULT_ICON[used.result]}</p>
+          <p className="text-4xl font-black">{label.text}</p>
+          <p className="font-bold">{label.sub}</p>
         </div>
         <ItemChips row={used} />
         <ChainLink txHash={used.txHash} />
@@ -308,8 +310,10 @@ function EntryQr({ profile }: { profile: Profile }) {
 
   return (
     <div className="space-y-5 text-center">
-      <p className="text-sm text-ink-muted">게이트 카메라에 이 화면을 보여주세요</p>
-      <div className="relative bg-white border-2 border-charcoal p-4 aspect-square flex items-center justify-center">
+      <p className="text-2xl font-black text-charcoal">
+        게이트 카메라에 <span className="bg-safety-yellow px-1">이 화면</span>을 보여주세요
+      </p>
+      <div className="relative bg-white p-4 aspect-square flex items-center justify-center border-[5px] border-safety-yellow">
         {image && <img src={image} alt="출입 QR" className={`w-full ${expired ? 'opacity-15' : ''}`} />}
         {expired && <p className="absolute font-display text-2xl font-bold uppercase text-charcoal">만료됨</p>}
       </div>
@@ -341,7 +345,7 @@ function Records({ profile }: { profile: Profile }) {
 
   return (
     <div className="space-y-3">
-      <h1 className="font-display text-2xl font-bold uppercase text-charcoal">내 출입 기록</h1>
+      <h1 className="text-2xl font-black text-charcoal">내 출입 기록</h1>
       <p className="text-xs text-ink-muted">통과 여부만 보여요. 검사 사진과 음주 수치는 앱에 표시하지 않아요.</p>
       {rows.map((r) => {
         const label = RESULT_LABEL[r.result]
@@ -349,7 +353,7 @@ function Records({ profile }: { profile: Profile }) {
           <div key={r.nonce} className="bg-white border-2 border-charcoal/20 p-4 space-y-2">
             <div className="flex justify-between items-center">
               <span className="text-sm text-ink">{new Date(r.at * 1000).toLocaleString()}</span>
-              <span className={`text-xs font-display font-bold uppercase px-2.5 py-1 border-2 border-charcoal ${label.cls}`}>{label.text}</span>
+              <span className={`text-xs font-bold px-2.5 py-1 ${label.cls}`}>{label.short}</span>
             </div>
             <ItemChips row={r} />
             <ChainLink txHash={r.txHash} />
@@ -390,7 +394,7 @@ function BigButton(props: {
     <button
       onClick={props.onClick}
       disabled={props.disabled}
-      className={`w-full border-2 border-charcoal py-4 text-lg font-display font-bold uppercase tracking-wide disabled:opacity-35 ${style}`}
+      className={`w-full py-4 text-xl font-black border-b-[5px] border-charcoal disabled:opacity-35 ${style}`}
     >
       {props.children}
     </button>

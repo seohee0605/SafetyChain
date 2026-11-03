@@ -28,6 +28,7 @@ type RecordRow = {
 }
 type Tab = 'qr' | 'records'
 
+
 const PROFILE_KEY = 'safetychain.worker' // 사번·현장만 (비밀값 아님)
 const SESSION_KEY = 'safetychain.worker.session' // 세션 토큰은 탭을 닫으면 사라지게 sessionStorage
 
@@ -618,16 +619,19 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
     return () => clearInterval(t)
   }, [])
 
-  // 게이트에서 이 QR이 쓰였는지 확인해서 결과를 폰에도 띄운다
+  // 게이트에서 이 QR이 쓰였는지 확인해서 결과를 폰에도 띄운다.
+  // 차단(빨강)이면 감독자가 수동 처리할 수 있으니, 결과 화면을 보고 있는 동안 계속 확인해서
+  // 수동 처리 통과가 되면 노랑(감독자 확인 후 통과)으로 바꾼다. 새 QR을 받으면 멈춘다
+  const usedResult = used?.result ?? null
   useEffect(() => {
-    if (!qr || used) return
+    if (!qr || (usedResult !== null && usedResult !== 'fail')) return
     const t = setInterval(async () => {
       const rows = await call<RecordRow[]>(recordsPath(profile)).catch(() => null)
       const hit = rows?.find((r) => r.nonce === qr.nonce)
-      if (hit) setUsed(hit)
+      if (hit && hit.result !== usedResult) setUsed(hit)
     }, 3000)
     return () => clearInterval(t)
-  }, [qr, used, profile, call])
+  }, [qr, usedResult, profile, call])
 
   if (used) {
     const label = RESULT_LABEL[used.result]
@@ -641,6 +645,7 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
           <p className="font-bold">{label.sub}</p>
         </div>
         <ItemChips row={used} />
+        {used.result === 'fail' && <p className={T.help}>감독자가 확인해 통과시키면 이 화면이 자동으로 바뀌어요.</p>}
         <ChainLink txHash={used.txHash} />
         <BigButton onClick={issue}>새 QR 받기</BigButton>
       </div>
@@ -676,10 +681,15 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
 function Records({ profile, call }: { profile: Profile; call: Call }) {
   const [rows, setRows] = useState<RecordRow[] | null>(null)
 
+  // 기록 화면을 보는 동안 5초마다 새로 불러온다 (감독자 수동 처리 결과가 바로 반영되게)
   useEffect(() => {
-    call<RecordRow[]>(recordsPath(profile))
-      .then(setRows)
-      .catch(() => setRows([]))
+    const load = () =>
+      call<RecordRow[]>(recordsPath(profile))
+        .then(setRows)
+        .catch(() => setRows((r) => r ?? []))
+    load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
   }, [profile, call])
 
 

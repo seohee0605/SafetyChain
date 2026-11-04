@@ -1,5 +1,5 @@
 import QRCode from 'qrcode'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChainLink } from '../components/ui'
 import { BACKEND_URL } from '../config'
 import {
@@ -27,6 +27,7 @@ type RecordRow = {
   txHash: string
 }
 type Tab = 'qr' | 'records'
+
 
 const PROFILE_KEY = 'safetychain.worker' // 사번·현장만 (비밀값 아님)
 const SESSION_KEY = 'safetychain.worker.session' // 세션 토큰은 탭을 닫으면 사라지게 sessionStorage
@@ -152,12 +153,14 @@ export default function WorkerApp() {
     <div className="min-h-dvh bg-paper flex justify-center">
       <div className="w-full max-w-md flex flex-col min-h-dvh">
         <header className="bg-charcoal text-white px-5 pt-[max(1.25rem,env(safe-area-inset-top))] pb-4">
-          <p className="font-display text-xl font-extrabold uppercase tracking-wider leading-none">
-            Safety<span className="text-safety-yellow">Chain</span>
-            <span className="ml-2 text-sm text-white/60 normal-case tracking-normal font-sans font-medium">근로자</span>
-          </p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-display text-xl font-extrabold uppercase tracking-wider leading-none">
+              Safety<span className="text-safety-yellow">Chain</span>
+              <span className="ml-2 text-sm text-white/60 normal-case tracking-normal font-sans font-medium">근로자</span>
+            </p>
+          </div>
           {profile && (
-            <p className="text-xs text-white/60 mt-1.5">
+            <p className="text-[13px] text-white/60 mt-1.5">
               사번 {profile.workerId} · 현장 {profile.siteId}
               {session && <span className="ml-2 text-safety-yellow">● 본인 확인됨</span>}
             </p>
@@ -165,11 +168,19 @@ export default function WorkerApp() {
         </header>
         <div className="h-1.5 hazard-stripes" />
 
-        <main className="flex-1 px-5 py-6">
+        <main className="flex-1 flex flex-col px-5 pt-6 pb-5">
           {unavailable && !session && (
-            <p className="mb-5 border-2 border-hazard-red bg-white p-3 text-sm font-semibold text-hazard-red">{unavailable}</p>
+            <p className="mb-5 border-2 border-hazard-red bg-white p-3 text-[13px] font-semibold text-hazard-red">{unavailable}</p>
           )}
-          {!profile && <Register onDone={signedIn} />}
+          {!profile && (
+            <Register
+              onDone={signedIn}
+              onExisting={(p) => {
+                store(localStorage, PROFILE_KEY, p)
+                setProfile(p)
+              }}
+            />
+          )}
           {profile && !session && <Login profile={profile} onDone={(s) => signedIn(profile, s)} />}
           {profile && session && consent === false && <Consent profile={profile} call={call} onAgreed={() => setConsent(true)} />}
           {profile && session && consent && tab === 'qr' && <EntryQr profile={profile} call={call} />}
@@ -182,7 +193,7 @@ export default function WorkerApp() {
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`py-4 font-display font-bold uppercase tracking-wide ${tab === t ? 'bg-safety-yellow text-charcoal' : 'text-ink-muted'}`}
+                className={`h-14 text-[15px] font-bold ${tab === t ? 'bg-safety-yellow text-charcoal' : 'text-ink-muted'}`}
               >
                 {t === 'qr' ? '출입 QR' : '내 기록'}
               </button>
@@ -191,14 +202,14 @@ export default function WorkerApp() {
         )}
 
         {profile && (
-          <footer className="px-5 py-3 text-xs text-ink-muted flex gap-4 justify-center">
+          <footer className="px-5 pb-[max(0.5rem,env(safe-area-inset-bottom))] text-[13px] text-ink-muted flex gap-4 justify-center">
             {session && (
-              <button onClick={signOut} className="underline">로그아웃</button>
+              <button onClick={signOut} className="underline min-h-11">로그아웃</button>
             )}
             {session && consent && (
-              <button onClick={withdraw} className="underline">동의 철회</button>
+              <button onClick={withdraw} className="underline min-h-11">동의 철회</button>
             )}
-            <button onClick={forgetDevice} className="underline">이 폰에서 사번 지우기</button>
+            <button onClick={forgetDevice} className="underline min-h-11">이 폰에서 사번 지우기</button>
           </footer>
         )}
       </div>
@@ -208,64 +219,251 @@ export default function WorkerApp() {
 
 type Call = <T>(path: string, init?: { method?: string; body?: unknown }) => Promise<T>
 
-const FIELD =
-  'w-full border-2 border-charcoal/70 px-4 py-3.5 text-lg bg-white outline-none focus:border-charcoal focus:ring-2 focus:ring-safety-yellow'
+// 화면 규격 (폰 360~430px 기준, 390px에서 확인). 모든 근로자 앱 화면이 이 값만 쓴다
+//   좌우 여백 20px · 제목 28px · 본문 15px · 라벨 15px · 보조 13px
+//   입력 칸·코드 칸·큰 버튼 높이 56px · 테두리 3px · 터치 영역 최소 44px
+const T = {
+  h1: 'text-[28px] leading-[1.25] font-black text-charcoal [word-break:keep-all]',
+  body: 'text-[15px] leading-relaxed text-ink-muted [word-break:keep-all]',
+  label: 'block mb-2 text-[15px] font-bold text-charcoal',
+  help: 'text-[13px] leading-relaxed text-ink-muted [word-break:keep-all]',
+  box: 'h-14 bg-white border-[3px] outline-none',
+}
 
-function Register({ onDone }: { onDone: (p: Profile, s: Session) => void }) {
+// 위는 내용, 아래(버튼·안내)는 화면 바닥에 붙는다
+function Screen(props: { children: React.ReactNode; bottom?: React.ReactNode; center?: boolean }) {
+  return (
+    <div className={`flex-1 flex flex-col ${props.center ? 'text-center' : ''}`}>
+      <div>{props.children}</div>
+      {props.bottom && <div className="mt-auto pt-8 space-y-3">{props.bottom}</div>}
+    </div>
+  )
+}
+
+function Notice(props: { icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className={`bg-paper-dark p-3.5 flex gap-3 items-start text-left ${T.help} text-ink`}>
+      <span className="w-6 h-6 shrink-0 bg-charcoal text-safety-yellow grid place-items-center">{props.icon}</span>
+      <p>{props.children}</p>
+    </div>
+  )
+}
+
+type CodeError = 'invalid' | 'used' | 'expired'
+
+const CODE_ERROR: Record<CodeError, string> = {
+  invalid: '코드가 맞지 않아요. 감독자에게 확인해 주세요.',
+  used: '이미 사용한 코드예요. 감독자에게 새 코드를 받아 주세요.',
+  expired: '유효기간(24시간)이 지난 코드예요. 감독자에게 새 코드를 받아 주세요.',
+}
+
+function codeErrorKind(e: ApiError): CodeError | null {
+  if (e.message.includes('already used')) return 'used'
+  if (e.message.includes('expired')) return 'expired'
+  if (e.message.includes('invalid invite')) return 'invalid'
+  return null
+}
+
+function registerMessage(e: ApiError): string {
+  if (e.message.includes('origin')) return '등록된 근로자 앱 주소가 아니에요. 감독자에게 앱 주소를 다시 받아 주세요.'
+  return `등록하지 못했어요 (${e.message})`
+}
+
+function Field(props: { label: string; placeholder: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="block">
+      <span className={T.label}>{props.label}</span>
+      <input
+        className={`${T.box} w-full px-4 text-lg font-bold text-charcoal border-charcoal/60 placeholder:text-[15px] placeholder:font-normal placeholder:text-ink-muted/60 focus:border-charcoal focus:outline-solid focus:outline-[3px] focus:outline-safety-yellow-dark`}
+        placeholder={props.placeholder}
+        autoComplete="off"
+        autoCapitalize="characters"
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value.trim().toUpperCase())}
+      />
+    </label>
+  )
+}
+
+// 4자리 칸 3개. 입력하면 다음 칸으로, 지우면 이전 칸으로, 붙여넣기(1A2B-3C4D-5E6F)는 세 칸에 나눠 넣는다
+function CodeInput(props: { value: string[]; onChange: (v: string[]) => void; invalid: boolean }) {
+  const refs = [useRef<HTMLInputElement>(null), useRef<HTMLInputElement>(null), useRef<HTMLInputElement>(null)]
+
+  function fill(from: number, raw: string) {
+    const chars = raw.toUpperCase().replace(/[^0-9A-Z]/g, '')
+    const next = [...props.value]
+    next[from] = chars.slice(0, 4)
+    let rest = chars.slice(4)
+    let last = from
+    while (rest && last < 2) {
+      last++
+      next[last] = rest.slice(0, 4)
+      rest = rest.slice(4)
+    }
+    props.onChange(next)
+    refs[next[last].length === 4 && last < 2 ? last + 1 : last].current?.focus()
+  }
+
+  function keyDown(i: number, e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Backspace' && props.value[i] === '' && i > 0) {
+      e.preventDefault()
+      const next = [...props.value]
+      next[i - 1] = next[i - 1].slice(0, -1)
+      props.onChange(next)
+      refs[i - 1].current?.focus()
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      {props.value.map((part, i) => (
+        <div key={i} className="contents">
+          {i > 0 && <span className="text-xl font-bold text-ink-muted/60">–</span>}
+          <input
+            ref={refs[i]}
+            value={part}
+            placeholder="A1B2"
+            inputMode="text"
+            autoComplete={i === 0 ? 'one-time-code' : 'off'}
+            autoCapitalize="characters"
+            spellCheck={false}
+            aria-label={`초대 코드 ${i + 1}번째 4자리`}
+            onKeyDown={(e) => keyDown(i, e)}
+            onChange={(e) => fill(i, e.target.value)}
+            onPaste={(e) => {
+              e.preventDefault()
+              fill(i, e.clipboardData.getData('text'))
+            }}
+            className={`${T.box} min-w-0 flex-1 text-center font-mono text-xl tracking-[0.15em] pl-[0.15em] placeholder:text-ink-muted/35 ${
+              props.invalid
+                ? 'border-hazard-red text-hazard-red'
+                : 'border-charcoal/60 text-charcoal focus:border-charcoal focus:outline-solid focus:outline-[3px] focus:outline-safety-yellow-dark'
+            }`}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function LockIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="w-3.5 h-3.5" fill="currentColor" aria-hidden>
+      <path d="M4 7V5a4 4 0 1 1 8 0v2h1v8H3V7h1Zm2 0h4V5a2 2 0 1 0-4 0v2Z" />
+    </svg>
+  )
+}
+
+// 처음 등록 (한 화면): 사번 · 현장 ID · 초대 코드 12자리 → Face ID로 등록
+// "이미 등록했나요? QR 받기"는 사번·현장만 넣고 바로 Face ID 로그인으로 간다 (패스키가 이미 이 폰에 있을 때)
+function Register(props: { onDone: (p: Profile, s: Session) => void; onExisting: (p: Profile) => void }) {
   const [workerId, setWorkerId] = useState('')
   const [siteId, setSiteId] = useState('')
-  const [inviteCode, setInviteCode] = useState('')
+  const [code, setCode] = useState(['', '', ''])
   const [busy, setBusy] = useState(false)
+  const [codeError, setCodeError] = useState<CodeError | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [hint, setHint] = useState<string | null>(null)
+
+  const filled = code.join('').length === 12
+  const ids = { workerId, siteId }
+
+  function existing() {
+    if (!workerId || !siteId) {
+      setHint('사번과 현장 ID를 먼저 넣어 주세요. 이 폰에 등록된 Face ID로 바로 QR을 받아요.')
+      return
+    }
+    props.onExisting(ids)
+  }
 
   async function register() {
     setBusy(true)
     setError(null)
+    setCodeError(null)
+    const inviteCode = code.join('-')
+    let opt: RegisterOptions
     try {
-      const ids = { workerId, siteId }
-      const opt = await api<RegisterOptions>('/worker/register/options', { body: { ...ids, inviteCode } })
+      // 서버가 초대 코드를 먼저 확인한다. 틀리면 Face ID 창을 띄우지 않는다
+      opt = await api<RegisterOptions>('/worker/register/options', { body: { ...ids, inviteCode } })
+    } catch (e) {
+      const kind = e instanceof ApiError ? codeErrorKind(e) : null
+      if (kind) setCodeError(kind)
+      else setError(e instanceof ApiError ? registerMessage(e) : '서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.')
+      setBusy(false)
+      return
+    }
+    try {
       const att = await createPasskey(opt, `사번 ${workerId}`)
       const r = await api<Session>('/worker/register', { body: { ...ids, inviteCode, ...att } })
-      onDone(ids, r)
+      props.onDone(ids, r)
     } catch (e) {
-      setError(e instanceof ApiError ? registerMessage(e) : friendlyPasskeyError(e))
+      const kind = e instanceof ApiError ? codeErrorKind(e) : null
+      if (kind) setCodeError(kind)
+      else setError(e instanceof ApiError ? registerMessage(e) : friendlyPasskeyError(e))
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-3xl font-black text-charcoal">처음 등록</h1>
-      <p className="text-sm text-ink-muted">
-        현장 감독자에게 받은 <b>초대 코드</b>를 넣고 Face ID로 이 폰을 등록해요. 다른 사람은 내 사번으로 QR을 받을 수 없어요.
-      </p>
-      <input className={FIELD} placeholder="사번" autoComplete="off" value={workerId} onChange={(e) => setWorkerId(e.target.value.trim())} />
-      <input className={FIELD} placeholder="현장 ID" autoComplete="off" value={siteId} onChange={(e) => setSiteId(e.target.value.trim())} />
-      <input
-        className={`${FIELD} font-display tracking-[0.2em] uppercase`}
-        placeholder="초대 코드"
-        autoComplete="one-time-code"
-        value={inviteCode}
-        onChange={(e) => setInviteCode(e.target.value.trim().toUpperCase())}
-      />
-      {error && <p className="text-sm text-hazard-red font-semibold">{error}</p>}
-      <BigButton disabled={busy || !workerId || !siteId || !inviteCode} onClick={register}>
-        {busy ? 'Face ID 확인 중...' : 'Face ID로 등록'}
-      </BigButton>
-      <p className="text-xs text-ink-muted">
-        이 폰에 만들어지는 패스키는 Face ID·지문으로만 쓸 수 있고, 서버에는 공개키만 저장돼요.
-      </p>
-    </div>
-  )
-}
+    <Screen
+      bottom={
+        <>
+          <Notice icon={<LockIcon />}>Face ID로 등록하면 다른 사람은 내 사번으로 QR을 받을 수 없어요. 서버에는 공개키만 저장돼요.</Notice>
+          <BigButton disabled={busy || !workerId || !siteId || !filled || codeError !== null} onClick={register}>
+            {busy ? 'Face ID 확인 중...' : 'Face ID로 등록'}
+          </BigButton>
+          <p className={`text-center ${T.help}`}>
+            이미 등록했나요?{' '}
+            <button onClick={existing} className="underline font-bold text-charcoal min-h-11 px-1">
+              QR 받기
+            </button>
+          </p>
+        </>
+      }
+    >
+      <h1 className={T.h1}>처음 등록</h1>
 
-function registerMessage(e: ApiError): string {
-  if (e.message.includes('already used')) return '이미 사용한 초대 코드예요. 감독자에게 새 코드를 받아 주세요.'
-  if (e.message.includes('expired')) return '초대 코드 유효기간이 지났어요. 감독자에게 새 코드를 받아 주세요.'
-  if (e.message.includes('invalid invite')) return '사번·현장·초대 코드가 맞지 않아요.'
-  if (e.message.includes('origin')) return '등록된 근로자 앱 주소가 아니에요. 감독자에게 앱 주소를 다시 받아 주세요.'
-  return `등록하지 못했어요 (${e.message})`
+      <div className="mt-6 space-y-5">
+        <Field
+          label="사번"
+          placeholder="사번을 입력하세요 (예: W-1001)"
+          value={workerId}
+          onChange={(v) => {
+            setWorkerId(v)
+            setHint(null)
+          }}
+        />
+        <Field
+          label="현장 ID"
+          placeholder="현장 ID를 입력하세요 (예: A-03)"
+          value={siteId}
+          onChange={(v) => {
+            setSiteId(v)
+            setHint(null)
+          }}
+        />
+        <div>
+          <p className={T.label}>초대 코드</p>
+          <CodeInput
+            value={code}
+            onChange={(v) => {
+              setCode(v)
+              setCodeError(null)
+            }}
+            invalid={codeError !== null}
+          />
+          {codeError ? (
+            <p className={`mt-2 ${T.help} font-bold text-hazard-red`}>{CODE_ERROR[codeError]}</p>
+          ) : (
+            !filled && <p className={`mt-2 ${T.help}`}>감독자에게 받은 12자리 코드</p>
+          )}
+        </div>
+      </div>
+      {hint && <p className={`mt-4 ${T.help} font-semibold text-hazard-red`}>{hint}</p>}
+      {error && <p className={`mt-4 ${T.help} font-semibold text-hazard-red`}>{error}</p>}
+    </Screen>
+  )
 }
 
 function Login({ profile, onDone }: { profile: Profile; onDone: (s: Session) => void }) {
@@ -288,13 +486,15 @@ function Login({ profile, onDone }: { profile: Profile; onDone: (s: Session) => 
   }
 
   return (
-    <div className="space-y-6 text-center pt-6">
-      <p className="mx-auto w-24 h-24 rounded-full bg-charcoal text-safety-yellow grid place-items-center text-5xl">☺</p>
-      <div className="space-y-1">
-        <h1 className="text-3xl font-black text-charcoal">본인 확인</h1>
-        <p className="text-sm text-ink-muted">Face ID로 확인하면 오늘 출입 QR을 받을 수 있어요.</p>
+    <div className="space-y-6 text-center pt-4">
+      <div className="mx-auto w-36 h-36 rounded-full bg-charcoal/15 grid place-items-center">
+        <img src="/worker-mascot.png" alt="" className="w-22 -mt-1" />
       </div>
-      {error && <p className="text-sm text-hazard-red font-semibold">{error}</p>}
+      <div className="space-y-1.5">
+        <h1 className={T.h1}>본인 확인</h1>
+        <p className={T.body}>Face ID로 확인하면 오늘 출입 QR을 받을 수 있어요.</p>
+      </div>
+      {error && <p className={`${T.help} text-hazard-red font-semibold`}>{error}</p>}
       <BigButton disabled={busy} onClick={login}>
         {busy ? 'Face ID 확인 중...' : 'Face ID로 시작'}
       </BigButton>
@@ -318,9 +518,19 @@ function Consent({ profile, call, onAgreed }: { profile: Profile; call: Call; on
   }
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-3xl font-black text-charcoal">정보 수집 동의</h1>
-      <p className="text-sm text-ink-muted">자동 출입 게이트를 쓰려면 아래 두 가지 동의가 필요해요.</p>
+    <Screen
+      bottom={
+        <>
+          {error && <p className={`${T.help} text-hazard-red font-semibold`}>{error}</p>}
+          <BigButton disabled={!personal || !sensitive} onClick={agree}>
+            동의하고 시작
+          </BigButton>
+        </>
+      }
+    >
+      <h1 className={T.h1}>정보 수집 동의</h1>
+      <p className={`mt-2 ${T.body}`}>자동 출입 게이트를 쓰려면 아래 두 가지 동의가 필요해요.</p>
+      <div className="mt-5 space-y-3">
       <ConsentBox
         checked={personal}
         onChange={setPersonal}
@@ -343,14 +553,11 @@ function Consent({ profile, call, onAgreed }: { profile: Profile; call: Call; on
           ['보관', '해당 현장 공사 기간'],
         ]}
       />
-      <p className="text-xs text-ink-muted">
+      </div>
+      <p className={`mt-3 ${T.help}`}>
         동의하지 않을 권리가 있어요. 동의하지 않아도 관리자 대면 확인으로 출입할 수 있고, 언제든 앱에서 철회할 수 있어요.
       </p>
-      {error && <p className="text-sm text-hazard-red font-semibold">{error}</p>}
-      <BigButton disabled={!personal || !sensitive} onClick={agree}>
-        동의하고 시작
-      </BigButton>
-    </div>
+    </Screen>
   )
 }
 
@@ -364,12 +571,12 @@ function ConsentBox(props: { checked: boolean; onChange: (v: boolean) => void; t
           onChange={(e) => props.onChange(e.target.checked)}
           className="w-6 h-6 accent-safety-yellow shrink-0"
         />
-        <span className="font-semibold text-charcoal">{props.title}</span>
+        <span className="text-[15px] font-bold text-charcoal">{props.title}</span>
       </div>
-      <dl className="mt-3 space-y-1 text-xs text-ink-muted">
+      <dl className="mt-3 space-y-1 text-[13px] leading-snug text-ink-muted [word-break:keep-all]">
         {props.rows.map(([k, v]) => (
           <div key={k} className="flex gap-2">
-            <dt className="w-14 shrink-0 font-semibold">{k}</dt>
+            <dt className="w-16 shrink-0 font-semibold">{k}</dt>
             <dd>{v}</dd>
           </div>
         ))}
@@ -412,16 +619,19 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
     return () => clearInterval(t)
   }, [])
 
-  // 게이트에서 이 QR이 쓰였는지 확인해서 결과를 폰에도 띄운다
+  // 게이트에서 이 QR이 쓰였는지 확인해서 결과를 폰에도 띄운다.
+  // 차단(빨강)이면 감독자가 수동 처리할 수 있으니, 결과 화면을 보고 있는 동안 계속 확인해서
+  // 수동 처리 통과가 되면 노랑(감독자 확인 후 통과)으로 바꾼다. 새 QR을 받으면 멈춘다
+  const usedResult = used?.result ?? null
   useEffect(() => {
-    if (!qr || used) return
+    if (!qr || (usedResult !== null && usedResult !== 'fail')) return
     const t = setInterval(async () => {
       const rows = await call<RecordRow[]>(recordsPath(profile)).catch(() => null)
       const hit = rows?.find((r) => r.nonce === qr.nonce)
-      if (hit) setUsed(hit)
+      if (hit && hit.result !== usedResult) setUsed(hit)
     }, 3000)
     return () => clearInterval(t)
-  }, [qr, used, profile, call])
+  }, [qr, usedResult, profile, call])
 
   if (used) {
     const label = RESULT_LABEL[used.result]
@@ -435,6 +645,7 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
           <p className="font-bold">{label.sub}</p>
         </div>
         <ItemChips row={used} />
+        {used.result === 'fail' && <p className={T.help}>감독자가 확인해 통과시키면 이 화면이 자동으로 바뀌어요.</p>}
         <ChainLink txHash={used.txHash} />
         <BigButton onClick={issue}>새 QR 받기</BigButton>
       </div>
@@ -446,20 +657,20 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
 
   return (
     <div className="space-y-5 text-center">
-      <p className="text-2xl font-black text-charcoal">
+      <p className="text-[22px] leading-snug font-black text-charcoal [word-break:keep-all]">
         게이트 카메라에 <span className="bg-safety-yellow px-1">이 화면</span>을 보여주세요
       </p>
-      <div className="relative bg-white p-4 aspect-square flex items-center justify-center border-[5px] border-safety-yellow">
+      <div className="relative mx-auto w-full max-w-[min(100%,44dvh)] bg-white p-3 aspect-square flex items-center justify-center border-[5px] border-safety-yellow">
         {image && <img src={image} alt="출입 QR" className={`w-full ${expired ? 'opacity-15' : ''}`} />}
         {expired && <p className="absolute font-display text-2xl font-bold uppercase text-charcoal">만료됨</p>}
       </div>
       {qr && !expired && (
         <p className="font-display text-2xl font-bold text-charcoal">
           {Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')}{' '}
-          <span className="text-sm text-ink-muted font-sans font-normal">남음 · 1회용 · 본인 전용</span>
+          <span className="text-[13px] text-ink-muted font-sans font-normal">남음 · 1회용 · 본인 전용</span>
         </p>
       )}
-      {error && <p className="text-sm text-hazard-red font-semibold">{error}</p>}
+      {error && <p className={`${T.help} text-hazard-red font-semibold`}>{error}</p>}
       <BigButton onClick={issue} variant={expired ? 'primary' : 'secondary'}>
         새 QR 받기
       </BigButton>
@@ -470,25 +681,30 @@ function EntryQr({ profile, call }: { profile: Profile; call: Call }) {
 function Records({ profile, call }: { profile: Profile; call: Call }) {
   const [rows, setRows] = useState<RecordRow[] | null>(null)
 
+  // 기록 화면을 보는 동안 5초마다 새로 불러온다 (감독자 수동 처리 결과가 바로 반영되게)
   useEffect(() => {
-    call<RecordRow[]>(recordsPath(profile))
-      .then(setRows)
-      .catch(() => setRows([]))
+    const load = () =>
+      call<RecordRow[]>(recordsPath(profile))
+        .then(setRows)
+        .catch(() => setRows((r) => r ?? []))
+    load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
   }, [profile, call])
 
-  if (rows === null) return <p className="text-sm text-ink-muted">불러오는 중...</p>
-  if (rows.length === 0) return <p className="text-sm text-ink-muted">아직 출입 기록이 없어요.</p>
 
   return (
     <div className="space-y-3">
-      <h1 className="text-2xl font-black text-charcoal">내 출입 기록</h1>
-      <p className="text-xs text-ink-muted">통과 여부만 보여요. 검사 사진과 음주 측정 결과는 앱에 표시하지 않아요.</p>
-      {rows.map((r) => {
+      <h1 className={T.h1}>내 출입 기록</h1>
+      <p className={T.help}>통과 여부만 보여요. 검사 사진과 음주 측정 결과는 앱에 표시하지 않아요.</p>
+      {rows === null && <p className={T.body}>불러오는 중...</p>}
+      {rows?.length === 0 && <p className={`bg-white p-4 ${T.body}`}>아직 출입 기록이 없어요.</p>}
+      {rows?.map((r) => {
         const label = RESULT_LABEL[r.result]
         return (
           <div key={r.nonce} className="bg-white border-2 border-charcoal/20 p-4 space-y-2">
             <div className="flex justify-between items-center">
-              <span className="text-sm text-ink">{new Date(r.at * 1000).toLocaleString()}</span>
+              <span className="text-[13px] text-ink">{new Date(r.at * 1000).toLocaleString()}</span>
               <span className={`text-xs font-bold px-2.5 py-1 ${label.cls}`}>{label.short}</span>
             </div>
             <ItemChips row={r} />
@@ -503,7 +719,7 @@ function Records({ profile, call }: { profile: Profile; call: Call }) {
 // 음주 결과는 본인 화면에도 띄우지 않는다 (민감정보 최소 노출)
 function ItemChips({ row }: { row: Pick<RecordRow, 'helmetPass' | 'shoesPass'> }) {
   return (
-    <div className="flex gap-1.5 justify-center flex-wrap text-xs">
+    <div className="flex gap-1.5 justify-center flex-wrap text-[13px]">
       {(
         [
           ['안전모', row.helmetPass],
@@ -527,7 +743,7 @@ function BigButton(props: { onClick: () => void; disabled?: boolean; variant?: '
     <button
       onClick={props.onClick}
       disabled={props.disabled}
-      className={`w-full py-4 text-xl font-black border-b-[5px] border-charcoal disabled:opacity-35 ${style}`}
+      className={`w-full h-14 text-lg font-black border-b-4 border-charcoal disabled:opacity-35 ${style}`}
     >
       {props.children}
     </button>
